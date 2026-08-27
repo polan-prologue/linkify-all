@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Linkify All - 明文链接自动转换
 // @namespace    local.linkify.all
-// @version      1.0.3
+// @version      1.0.4
 // @description  把任意网页中的明文网址自动变成可点击链接：全站生效、子域名识别、场景开关、学习规则、网盘提取码自动填入、失效链接检测、WebDAV 版本化云备份。零依赖纯本地。
 // @author       polan-prologue
 // @match        *://*/*
@@ -500,7 +500,9 @@
    * ① 命中延伸到节点末尾且主机名不完整 → 向后收集兄弟节点中的 URL 字符
    *    前缀，续接成完整链接，整块替换并吞并被消费的兄弟节点；
    * ② 续接不成 → 抑制该命中，宁可不转也不出残缺短链；
-   * ③ 完整链接即使恰好结尾于节点末尾也不续接，避免误吞无关后续文本。 */
+   * ③ 完整链接即使恰好结尾于节点末尾也不续接，避免误吞无关后续文本。
+   * v1.0.4 ④ 节点恰好以裸协议头（协议后零字符）收尾时常规匹配必然落空、
+   *    续接器没有启动种子 → 合成种子命中，交由同一套续接管线组装验证。 */
 
   var CONT_URL_RE = /^[A-Za-z0-9._~:/?#@!$&'()*+,;=\-[\]%]+/;
   var INLINE_TAGS = { SPAN: 1, A: 1, B: 1, I: 1, EM: 1, STRONG: 1, U: 1, S: 1, CODE: 1, SMALL: 1, LABEL: 1, FONT: 1, WBR: 1, MARK: 1 };
@@ -530,11 +532,13 @@
     return n;
   }
 
-  // 收集 node 之后兄弟内容中可续接的 URL 字符前缀；
-  // 文本节点可部分消费（改写 nodeValue），元素节点仅整块消费
+  // 收集 node 之后兄弟内容中可续接的 URL 字符前缀。文本节点可部分消费
+  // （改写 nodeValue）；元素节点同样支持部分消费——保留包裹元素与其残余
+  // 文本，仅剔除已被并走的 URL 前缀（平台常把「链接尾巴+正文」包进同一
+  // 个 <span>）。最多串联 12 个兄弟节点（v1.0.4: 6→12），覆盖更深拆分链
   function collectContinuation(node) {
     var str = "", parts = [], sib = node.nextSibling, guard = 0;
-    while (sib && guard++ < 6 && str.length < 500) {
+    while (sib && guard++ < 12 && str.length < 500) {
       if (sib.nodeType === 1 && sib.getAttribute && sib.getAttribute("data-lfa")) break;
       var t = sib.nodeType === 3 ? (sib.nodeValue || "") : (sib.textContent || "");
       if (!t) { sib = sib.nextSibling; continue; }
@@ -542,13 +546,37 @@
       var take = mc ? mc[0] : "";
       if (!take) break;
       var partial = take.length < t.length;
-      if (partial && sib.nodeType !== 3) break;   // 元素只整块消费
-      parts.push({ node: sib, len: take.length, partial: partial });
+      parts.push({ node: sib, len: take.length, partial: partial, orig: t });
       str += take;
       if (partial) break;
       sib = sib.nextSibling;
     }
     return { str: str, parts: parts };
+  }
+
+  // 续接核心（v1.0.4 自 v1.0.2 内联逻辑抽出公用）：以 hit 为种子，
+  // 收集节点末尾之后的兄弟 URL 前缀整体组装。组装文本先剥离缝合处粘连的
+  // 前导符号（拆分往往把 "." 这类分隔符留在了下一个节点里），再经「主机
+  // 完整性」与 toHref 双重闸门——单标签主机、半截主机一律视为组装不完整，
+  // 宁可不转也不出残缺短链；通过后改写 hit 并返回待消费的兄弟列表。
+  function stitchFromHit(hit, node, text) {
+    var cont = collectContinuation(inlineEndNode(node));
+    var joined = text.slice(hit.start) + cont.str;
+    joined = joined.replace(/^(https?:\/\/)\.+/i, "$1");
+    var stitched = trimTrailing(joined);
+    if (!stitched || hostIncomplete(stitched)) {
+      hit.suppressed = true;
+      return null;
+    }
+    var shref = toHref(stitched);
+    if (!cont.str || !shref || stitched.length <= hit.raw.length + 1) {
+      hit.suppressed = true;
+      return null;
+    }
+    hit.raw = stitched;
+    hit.href = shref;
+    hit.end = text.length;
+    return cont.parts;
   }
 
   function processTextNode(node) {
@@ -568,17 +596,25 @@
     if (urlHits.length) {
       var lastHit = urlHits[urlHits.length - 1];
       if (lastHit.mend >= text.length && hostIncomplete(lastHit.raw)) {
-        var cont = collectContinuation(inlineEndNode(node));
-        var stitched = trimTrailing(text.slice(lastHit.start) + cont.str);
-        var shref = stitched ? toHref(stitched) : null;
-        if (cont.str && shref && stitched.length > lastHit.raw.length + 1) {
-          lastHit.raw = stitched;
-          lastHit.href = shref;
-          lastHit.end = text.length;
-          removeParts = cont.parts;
-        } else {
-          lastHit.suppressed = true;
-        }
+        removeParts = stitchFromHit(lastHit, node, text);
+      }
+    }
+    // v1.0.4：裸协议尾种子——节点以孤立 "https://"（协议后零字符）收尾时，
+    // SCHEME_SRC 要求协议后至少 1 字符，常规匹配在此必然落空，跨节点续接器
+    // 因没有种子而整链失联。此处合成种子命中进入同一套续接管线；协议头前
+    // 紧贴字母数字（非自然边界）、或任一命中已触及节点末尾时不补种。
+    if (!removeParts) {
+      var mSeed = /https?:\/\/$/i.exec(text);
+      var seedOk = !!mSeed;
+      var ss = seedOk ? mSeed.index : -1;
+      if (seedOk && ss > 0 && /[A-Za-z0-9]/.test(text.charAt(ss - 1))) seedOk = false;
+      for (var si2 = 0; seedOk && si2 < urlHits.length; si2++) {
+        if (urlHits[si2].end > ss || urlHits[si2].mend >= text.length) seedOk = false;
+      }
+      if (seedOk) {
+        var seed = { start: ss, end: text.length, mend: text.length, raw: mSeed[0], href: null };
+        urlHits.push(seed);
+        removeParts = stitchFromHit(seed, node, text);
       }
     }
     var ruleHits = findRuleHits(text);
@@ -613,6 +649,13 @@
         if (!pn.parentNode) continue;
         if (part.partial && pn.nodeType === 3) {
           try { pn.nodeValue = (pn.nodeValue || "").slice(part.len); } catch (e) { }
+        } else if (part.partial && pn.nodeType === 1) {
+          // 元素部分消费：保留包裹与残余正文，仅剔除已被并走的 URL 前缀
+          var remain = (part.orig || "").slice(part.len);
+          try {
+            while (pn.firstChild) pn.removeChild(pn.firstChild);
+            if (remain) pn.appendChild(document.createTextNode(remain));
+          } catch (e) { }
         } else {
           pn.parentNode.removeChild(pn);
         }
@@ -1468,7 +1511,7 @@
     h.textContent = title;
     var ver = document.createElement("span");
     ver.className = "lfa-head-ver";
-    ver.textContent = "v1.0.3";
+    ver.textContent = "v1.0.4";
     var closeBtn = document.createElement("span");
     closeBtn.className = "lfa-close";
     closeBtn.textContent = "✕";
