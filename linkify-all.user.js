@@ -81,7 +81,7 @@
   var LABEL = "[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?";
   var DOMAIN = "(?:" + LABEL + "\\.)+[a-zA-Z]{2,24}";
   var HOST_WWW = "www\\.(?:" + LABEL + "\\.)*[a-zA-Z]{2,24}";
-  // 子域名主机（≥3 段，如 dshell.ft07.com）：无 www 无路径也值得转换，
+  // 子域名主机（≥3 段，如 news.example.com）：无 www 无路径也值得转换，
   // 与易误判的二段裸域名（example.com，仍不转）区分
   var HOST_SUB = "(?:" + LABEL + "\\.){2,}[a-zA-Z]{2,24}";
   var HOST_PATH = DOMAIN + "(?:\\/" + P + "*)";
@@ -373,8 +373,8 @@
   /* ══════════════════ 核心：文本节点转换 ══════════════════ */
 
   // 疑似文件扩展名黑名单：无协议候选以此结尾 → 视为文件名而非网址，不转换。
-  // v1.0 修复：GitHub release 附件名 WorkDaddy-1.0.17-win64.zip 被子域名分支
-  // 误判成 https://workdaddy-1.0.17-win64.zip/（.zip/.mov/.app 均已开放为 gTLD，
+  // v1.0 修复：GitHub release 附件名 example-app-1.0.17-win64.zip 被子域名分支
+  // 误判成 https://example-app-1.0.17-win64.zip/（.zip/.mov/.app 均已开放为 gTLD，
   // 但作为文件名远比真站常见，故否决优先）。
   var FILE_EXT_BLACKLIST = {
     zip: 1, rar: 1, "7z": 1, exe: 1, msi: 1, msix: 1,

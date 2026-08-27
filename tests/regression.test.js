@@ -1,5 +1,5 @@
 /*
- * v0.7 自动化测试 = A组（B站 Shadow 回归）+ B组（兜底扫描）+ C组（中文语境）
+ * v0.7 自动化测试 = A组（Shadow DOM 回归）+ B组（兜底扫描）+ C组（中文语境）
  *                 + D组（学习规则）+ E组（备份往返）+ F组（v0.7 新功能）
  *
  * F 组：
@@ -154,7 +154,7 @@ globalThis.document = doc;
 globalThis.window = {
   addEventListener() {}, removeEventListener() {}, getSelection: () => null,
 };
-globalThis.location = { hostname: "www.bilibili.com", hash: "#lfa-dev" };
+globalThis.location = { hostname: "www.example.com", hash: "#lfa-dev" };
 globalThis.Element = MockElement;
 globalThis.NodeFilter = { SHOW_ALL: -1, SHOW_ELEMENT: 1, SHOW_TEXT: 4, FILTER_ACCEPT: 1, FILTER_REJECT: 2, FILTER_SKIP: 3 };
 globalThis.MutationObserver = MockMutationObserver;
@@ -228,8 +228,8 @@ const lfa = globalThis.window.__LFA__;
 (async () => {
   await sleep(300);
 
-  /* ── A 组：B站三层嵌套 Shadow DOM 动态加载 ── */
-  console.log("\n[2-5] B站 Shadow DOM 场景…");
+  /* ── A 组：三层嵌套 Shadow DOM 动态加载 ── */
+  console.log("\n[2-5] Shadow DOM 场景…");
   const biliComments = new MockElement("bili-comments");
   doc.body.appendChild(biliComments);
   await sleep(250);
@@ -246,14 +246,14 @@ const lfa = globalThis.window.__LFA__;
   comment.attachShadow({ mode: "open" });
   await sleep(300);
   const realText =
-    "【视频中提到的下载神器官方链接】 📥 1. qBittorrent EE (终极王者，自动反吸血) " +
+    "【资源帖中的官方链接】 📥 1. 示例应用 1（全平台） " +
     "Tracker 自动更新订阅链接：https://pan.quark.cn/s/7e7f51a08273 " +
     "安装包：https://pan.quark.cn/s/6cc5d7a2089c " +
-    "官网：https://github.com/c0re100/qBittorrent-Enhanced-Edition/releases " +
-    "📥 2. Gopeed (全平台制霸) 安装包：https://pan.quark.cn/s/ce8055aceebd 官网：https://gopeed.com/ " +
-    "📥 3. Transmission(极致简洁) 安装包：https://pan.quark.cn/s/dc292ddd8d34 官网：https://transmissionbt.com/ " +
-    "📥 4. imFile(Motrix进阶版) 安装包：https://pan.quark.cn/s/735c54917ef3 官网：https://imfile.org/ " +
-    "Github官网：https://github.com/imfile-io/imfile-desktop";
+    "官网：https://github.com/example-org/example-app/releases " +
+    "📥 2. 示例应用 2 安装包：https://pan.quark.cn/s/ce8055aceebd 官网：https://app1.example.com/ " +
+    "📥 3. 示例应用 3 安装包：https://pan.quark.cn/s/dc292ddd8d34 官网：https://app2.example.com/ " +
+    "📥 4. 示例应用 4 安装包：https://pan.quark.cn/s/735c54917ef3 官网：https://app3.example.com/ " +
+    "Github官网：https://github.com/example-org/example-app";
   const contentDiv = new MockElement("div");
   contentDiv.appendChild(new MockNode(3, "#text", realText));
   comment.shadowRoot.appendChild(contentDiv);
@@ -263,29 +263,29 @@ const lfa = globalThis.window.__LFA__;
   console.log("\n[断言 A]");
   assert("A1: 三层嵌套 Shadow DOM 生成链接数量 = 10", anchorsA.length === 10, "实际 " + anchorsA.length);
   assert("A2: 第1条夸克链接 href 正确", hrefsA[0] === "https://pan.quark.cn/s/7e7f51a08273", "实际 " + hrefsA[0]);
-  assert("A3: 末条 GitHub 链接 href 正确", hrefsA[9] === "https://github.com/imfile-io/imfile-desktop", "实际 " + hrefsA[9]);
+  assert("A3: 末条 GitHub 链接 href 正确", hrefsA[9] === "https://github.com/example-org/example-app", "实际 " + hrefsA[9]);
   assert("A4: 原文保留", anchorsA.every((a) => a.getAttribute("data-raw") === a.textContent));
   assert("A5: 新标签页打开 + noopener", anchorsA.every((a) => a.target === "_blank" && a.rel === "noopener noreferrer"));
 
   /* ── C 组：中文语境 ── */
   console.log("\n[6] 中文语境…");
   const cnDiv = new MockElement("div");
-  cnDiv.appendChild(new MockNode(3, "#text", "看这个https://www.zhihu.com/question/1960114905232434428/answer/2005287245817607088，这里有激活方法"));
+  cnDiv.appendChild(new MockNode(3, "#text", "看这个https://www.example.com/question/1960114905232434428/answer/2005287245817607088，这里有激活方法"));
   cnDiv.appendChild(new MockElement("br"));
   cnDiv.appendChild(new MockNode(3, "#text", "参考 https://example.com。全文结束"));
   cnDiv.appendChild(new MockElement("br"));
   cnDiv.appendChild(new MockNode(3, "#text", "资源 https://pan.quark.cn/s/7e7f51a08273，密码：x7k9 速存"));
   cnDiv.appendChild(new MockElement("br"));
-  cnDiv.appendChild(new MockNode(3, "#text", "百科 https://zh.wikipedia.org/wiki/磁力 介绍"));
+  cnDiv.appendChild(new MockNode(3, "#text", "百科 https://example.org/wiki/磁力 介绍"));
   doc.body.appendChild(cnDiv);
   await sleep(600);
   const anchorsC = collectAnchors(cnDiv, []);
   const hrefsC = anchorsC.map((a) => a.getAttribute("href"));
   console.log("\n[断言 C]");
-  assert("C1: 知乎链接不被全角逗号+中文污染", hrefsC.includes("https://www.zhihu.com/question/1960114905232434428/answer/2005287245817607088"), JSON.stringify(hrefsC));
+  assert("C1: 长链接不被全角逗号+中文污染", hrefsC.includes("https://www.example.com/question/1960114905232434428/answer/2005287245817607088"), JSON.stringify(hrefsC));
   assert("C2: URL 后句号+中文不吞入", hrefsC.includes("https://example.com"), JSON.stringify(hrefsC));
   assert("C3: 逗号后提取码仍被识别", hrefsC.includes("https://pan.quark.cn/s/7e7f51a08273#lfa-c=x7k9"), JSON.stringify(hrefsC));
-  assert("C4: 汉字 IRI 在汉字处截断", hrefsC.includes("https://zh.wikipedia.org/wiki/"), JSON.stringify(hrefsC));
+  assert("C4: 汉字 IRI 在汉字处截断", hrefsC.includes("https://example.org/wiki/"), JSON.stringify(hrefsC));
   assert("C5: 共 4 条", anchorsC.length === 4, "实际 " + anchorsC.length);
 
   /* ── D 组：学习规则 ── */
@@ -595,8 +595,8 @@ const lfa = globalThis.window.__LFA__;
   const learnPanelH = doc.body.childNodes.find((c) => c.className === "lfa-panel" && c !== settingsH.wrap);
   const learnInputsH = learnPanelH ? allEls(learnPanelH, []).filter((n) => n.tagName === "INPUT") : [];
   const saveBtnH = learnPanelH ? allEls(learnPanelH, []).find((n) => n.tagName === "BUTTON" && n.textContent.includes("保存规则")) : null;
-  if (learnInputsH[0]) learnInputsH[0].value = "贴吧:t/123456";
-  if (learnInputsH[1]) learnInputsH[1].value = "https://tieba.baidu.com/p/123456";
+  if (learnInputsH[0]) learnInputsH[0].value = "论坛:t/123456";
+  if (learnInputsH[1]) learnInputsH[1].value = "https://example.com/p/123456";
   assert("H0: 学习窗口已打开且表单可填", learnInputsH.length >= 2 && !!saveBtnH,
     "inputs=" + learnInputsH.length + " save=" + !!saveBtnH);
   saveBtnH && saveBtnH.click();
@@ -606,8 +606,8 @@ const lfa = globalThis.window.__LFA__;
     rowsAfter === rowsBefore + 1,
     "before=" + rowsBefore + " after=" + rowsAfter);
   // 新规则应能直接列在面板里且命中数存在
-  const newRow = allEls(settingsH.body, []).find((n) => n.className === "lfa-rule" && n.textContent.includes("贴吧"));
-  assert("H2: 新规则行内容正确", !!newRow && newRow.textContent.includes("tieba.baidu.com/p/"), "row=" + (newRow ? newRow.textContent.slice(0, 60) : "null"));
+  const newRow = allEls(settingsH.body, []).find((n) => n.className === "lfa-rule" && n.textContent.includes("论坛"));
+  assert("H2: 新规则行内容正确", !!newRow && newRow.textContent.includes("example.com/p/"), "row=" + (newRow ? newRow.textContent.slice(0, 60) : "null"));
 
   /* ── I 组：批量累加规则（用户报"加到8条后面就不动"的复现） ── */
   console.log("\n[13] 批量教学 8 条规则（共到 10 条），验证列表全渲染且角标正确…");
@@ -648,38 +648,38 @@ const lfa = globalThis.window.__LFA__;
 
   /* ── B 组：兜底扫描 ── */
   console.log("\n[10] 静默注入验证兜底扫描…");
-  // v0.16：子域名主机（≥3 段）裸域名也转换——用户报的 B站简介 BUG
+  // v0.16：子域名主机（≥3 段）裸域名也转换——用户报的 bug
   const divJ = new MockElement("div");
-  const tj = new MockNode(3, "#text", "Mac 系统专用，网站：dshell.ft07.com 免费软件");
+  const tj = new MockNode(3, "#text", "Mac 系统专用，网站：news.example.com 免费软件");
   divJ.appendChild(tj);
   doc.body.appendChild(divJ);
   await sleep(600);
   const hrefsJ = collectAnchors(divJ, []).map((a) => a.getAttribute("href"));
-  assert("J-1: 子域名裸域名 dshell.ft07.com 自动补全转换（用户报的bug）",
-    hrefsJ.includes("https://dshell.ft07.com"), JSON.stringify(hrefsJ));
+  assert("J-1: 子域名裸域名 news.example.com 自动补全转换（用户报的bug）",
+    hrefsJ.includes("https://news.example.com"), JSON.stringify(hrefsJ));
 
   const div2 = new MockElement("div");
-  const t2 = new MockNode(3, "#text", "备用站 www.example.com 和裸域名 example.com 对比，还有 example.com/page/1 这条和 x3.y7.org 这个子域名");
+  const t2 = new MockNode(3, "#text", "备用站 www.example.com 和裸域名 example.com 对比，还有 example.com/page/1 这条和 sub2.example.org 这个子域名");
   div2._rawAppend(t2);
   doc.body._rawAppend(div2);
   await sleep(2800);
   const anchorsB = collectAnchors(doc.body, []).filter((a) =>
     a.getAttribute("href") === "https://www.example.com" || a.getAttribute("href") === "https://example.com/page/1" ||
-    a.getAttribute("href") === "https://x3.y7.org");
+    a.getAttribute("href") === "https://sub2.example.org");
   const hrefsB = anchorsB.map((a) => a.getAttribute("href"));
   assert("B1: 兜底扫描捕获静默 www 链接", hrefsB.includes("https://www.example.com"), JSON.stringify(hrefsB));
   assert("B3: 带路径裸域名补全转换", hrefsB.includes("https://example.com/page/1"), JSON.stringify(hrefsB));
   assert("J-2: 二段裸域名 example.com 仍不转换（稳健策略未回归）",
     !hrefsB.includes("https://example.com"), JSON.stringify(hrefsB));
-  assert("J-3: 子域名 x3.y7.org 在兜底扫描中也被转换",
-    hrefsB.includes("https://x3.y7.org"), JSON.stringify(hrefsB));
+  assert("J-3: 子域名 sub2.example.org 在兜底扫描中也被转换",
+    hrefsB.includes("https://sub2.example.org"), JSON.stringify(hrefsB));
 
   /* ── K 组：文件名否决（用户报 GitHub release 附件名误判） ── */
   console.log("\n[14] 文件扩展名否决…");
   // K1/K2: release 附件文件名独立出现 → 不转换（保持 GitHub 原生行为）
   const divK = new MockElement("div");
-  const k1 = new MockNode(3, "#text", "WorkDaddy-1.0.17-win64.zip");
-  const k2 = new MockNode(3, "#text", "WorkDaddy-Al-1.0.17.dmg 是 Mac 安装包");
+  const k1 = new MockNode(3, "#text", "example-app-1.0.17-win64.zip");
+  const k2 = new MockNode(3, "#text", "example-app-1.0.17.dmg 是 Mac 安装包");
   const k5 = new MockNode(3, "#text", "会议纪要 report.2026.doc 已归档");
   divK.appendChild(k1);
   divK.appendChild(new MockElement("br"));
@@ -689,32 +689,32 @@ const lfa = globalThis.window.__LFA__;
   doc.body.appendChild(divK);
   await sleep(600);
   const hrefsK = collectAnchors(divK, []).map((a) => a.getAttribute("href"));
-  assert("K1: release 附件名 WorkDaddy-1.0.17-win64.zip 不再误判为网址",
-    !hrefsK.some((h) => (h || "").includes("workdaddy")), JSON.stringify(hrefsK));
+  assert("K1: release 附件名 example-app-1.0.17-win64.zip 不再误判为网址",
+    !hrefsK.some((h) => (h || "").includes("example-app-1.0.17-win64")), JSON.stringify(hrefsK));
   assert("K2: .dmg / .doc 结尾的文件名同样不转换",
     hrefsK.length === 0, JSON.stringify(hrefsK));
   assert("K3: 原始文本保持纯文本未被改动",
-    divK.textContent.includes("WorkDaddy-1.0.17-win64.zip") && divK.textContent.includes("report.2026.doc"));
+    divK.textContent.includes("example-app-1.0.17-win64.zip") && divK.textContent.includes("report.2026.doc"));
 
   // K4: 带 https:// 的完整 .zip 直链不受否决影响（tier1 优先）
   const divK4 = new MockElement("div");
   divK4.appendChild(new MockNode(3, "#text",
-    "下载：https://github.com/babygoton/WorkDaddy/releases/download/1.0.17/WorkDaddy-1.0.17-win64.zip"));
+    "下载：https://github.com/example-org/example-app/releases/download/1.0.17/example-app-1.0.17-win64.zip"));
   doc.body.appendChild(divK4);
   await sleep(600);
   const hrefsK4 = collectAnchors(divK4, []).map((a) => a.getAttribute("href"));
   assert("K4: 带协议头的完整 .zip 直链正常转换（不被误伤）",
-    hrefsK4.length === 1 && hrefsK4[0] === "https://github.com/babygoton/WorkDaddy/releases/download/1.0.17/WorkDaddy-1.0.17-win64.zip",
+    hrefsK4.length === 1 && hrefsK4[0] === "https://github.com/example-org/example-app/releases/download/1.0.17/example-app-1.0.17-win64.zip",
     JSON.stringify(hrefsK4));
 
-  // K5: 子域名修复不回退——dshell.ft07.com（.com 不在扩展名表）仍转换
+  // K5: 子域名修复不回退——news.example.com（.com 不在扩展名表）仍转换
   const divK5 = new MockElement("div");
-  divK5.appendChild(new MockNode(3, "#text", "网站：dshell.ft07.com 免费软件"));
+  divK5.appendChild(new MockNode(3, "#text", "网站：news.example.com 免费软件"));
   doc.body.appendChild(divK5);
   await sleep(400);
   const hrefsK5 = collectAnchors(divK5, []).map((a) => a.getAttribute("href"));
-  assert("K5: 子域名修复不回退，dshell.ft07.com 仍转换",
-    hrefsK5.includes("https://dshell.ft07.com"), JSON.stringify(hrefsK5));
+  assert("K5: 子域名修复不回退，news.example.com 仍转换",
+    hrefsK5.includes("https://news.example.com"), JSON.stringify(hrefsK5));
 
   const failed = results.filter((r) => !r.pass);
   console.log("\n════════════════════════════════");
