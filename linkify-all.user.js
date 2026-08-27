@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Linkify All - 明文链接自动转换
 // @namespace    local.linkify.all
-// @version      1.0.4
+// @version      1.0.5
 // @description  把任意网页中的明文网址自动变成可点击链接：全站生效、子域名识别、场景开关、学习规则、网盘提取码自动填入、失效链接检测、WebDAV 版本化云备份。零依赖纯本地。
 // @author       polan-prologue
 // @match        *://*/*
@@ -38,6 +38,7 @@
  *   - WebDAV 云备份 / 恢复 / 设置（地址/账号/密码，凭据仅存本机）
  *
  * Alt + 点击转换出的链接 = 复制原始明文（链接含提取码时一并复制）
+ * Ctrl + 点击明文网址文本 = 直链跳转（含被防误判跳过的裸域名/文件名等）
  * ─────────────────────────────────────────────────────────────
  */
 
@@ -340,12 +341,14 @@
       try { c.re = ruleRegex(c.pat, "gi"); } catch (e) { continue; }
       rules.push(c);
     }
+    markProbeDirty();   // v1.0.4: 规则重新加载后需重建 probe 正则
   }
 
   function saveRules() {
     var out = [];
     for (var i = 0; i < rules.length; i++) out.push(ruleRecord(rules[i]));
     try { GM_setValue(RULES_KEY, out); } catch (e) { }
+    markProbeDirty();   // v1.0.4: 规则变化后 probe 正则需重建
     // 规则持久化后通知设置面板刷新列表（教学/导入/开关变更等所有入口统一生效）
     try { if (refreshSettingsRules) refreshSettingsRules(); } catch (e) { }
   }
@@ -375,20 +378,39 @@
     return { ok: true, rule: rule };
   }
 
-  function ruleProbeHit(text) {
-    if (!rules.length) return false;
-    var lower = null;
+  var probeRe = null;        // v1.0.4: 合并全部启用规则的 probe 为单一正则
+  var probeDirty = true;     // 规则增删/启停时置脏，下次匹配前重建
+
+  function rebuildProbeRe() {
+    var parts = [], seen = {};
     for (var i = 0; i < rules.length; i++) {
       var r = rules[i];
       if (!r.enabled || !r.probe) continue;
-      if (lower === null) lower = text.toLowerCase();
-      if (lower.indexOf(r.probe) !== -1) return true;
+      var p = r.probe;
+      if (seen[p]) continue;
+      seen[p] = 1;
+      parts.push(escapeRe(p));
     }
-    return false;
+    probeRe = parts.length ? new RegExp(parts.join("|"), "i") : null;
+    probeDirty = false;
   }
 
+  function markProbeDirty() {
+    probeDirty = true;
+    probeRe = null;
+  }
+
+  function ruleProbeHit(text) {
+    if (probeDirty) rebuildProbeRe();
+    if (!probeRe) return false;
+    return probeRe.test(text);
+  }
+
+  // v1.0.4: 合并两个预筛正则减少正则调用次数
+  var PREFILTER_COMBINED = /:\/\/|www\.|[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\/|(?:[a-zA-Z0-9-]+\.){2,}[a-zA-Z]{2,}/;
+
   function textPrefilter(text) {
-    return PREFILTER_RE.test(text) || PREFILTER_SUB_RE.test(text) || ruleProbeHit(text);
+    return PREFILTER_COMBINED.test(text) || ruleProbeHit(text);
   }
 
   /* ══════════════════ 核心：文本节点转换 ══════════════════ */
@@ -583,7 +605,10 @@
     var text = node.nodeValue;
     if (INVISIBLE_RE.test(text)) {
       text = text.replace(INVISIBLE_RE, "");   // v1.0.1: 剥离零宽字符后再匹配
+      // v1.0.4: 标记内部写入，避免 nodeValue 变更触发 MO 产生额外处理
+      internalWrite = true;
       try { node.nodeValue = text; } catch (e) { }
+      internalWrite = false;
     }
     if (!text || text.length < 6 || text.length > MAX_TEXT_LENGTH) return false;
     if (!node.parentNode) return false;
@@ -694,18 +719,37 @@
     if (!root || depth > MAX_SHADOW_DEPTH) return;
     if (root.nodeType === 3) { processTextNode(root); return; }
     if (root.nodeType !== 1 && root.nodeType !== 9 && root.nodeType !== 11) return;
+    // v1.0.4: 跳过已脱离文档的节点，避免处理无效 DOM 子树
+    if (root.nodeType === 1 && root !== document.documentElement && root !== document.body && !root.isConnected) return;
     if (root.nodeType === 1 && root.shadowRoot) {
       observeRoot(root.shadowRoot);
       processRootDeep(root.shadowRoot, depth + 1);
     }
-    processRoot(root);
-    var hosts = [];
+    // v1.0.4: 单次遍历同时收集文本节点和 Shadow DOM 宿主，避免双树遍历
+    var textNodes = [], hosts = [];
     try {
-      var w = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, null);
-      var e;
-      while ((e = w.nextNode())) if (e.shadowRoot) hosts.push(e);
+      var w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT, {
+        acceptNode: function (n) {
+          if (n.nodeType === 3) {
+            var v = n.nodeValue;
+            if (!v || v.length < 6 || v.length > MAX_TEXT_LENGTH) return NodeFilter.FILTER_REJECT;
+            if (isSkippableCached(n)) return NodeFilter.FILTER_REJECT;
+            if (!textPrefilter(v)) return NodeFilter.FILTER_REJECT;
+            return NodeFilter.FILTER_ACCEPT;
+          }
+          // v1.0.4: 元素节点用 FILTER_SKIP 而非 FILTER_REJECT，
+          // 确保 Shadow 宿主的光 DOM 子节点仍可被遍历到
+          if (n.nodeType === 1 && n.shadowRoot) { hosts.push(n); }
+          return NodeFilter.FILTER_SKIP;
+        }
+      });
+      var node;
+      while ((node = w.nextNode())) {
+        if (node.nodeType === 3) textNodes.push(node);
+      }
     } catch (err) { }
-    for (var i = 0; i < hosts.length; i++) processRootDeep(hosts[i], depth + 1);
+    for (var i = 0; i < textNodes.length; i++) processTextNode(textNodes[i]);
+    for (var j = 0; j < hosts.length; j++) processRootDeep(hosts[j], depth + 1);
   }
 
   /* ══════════════════ 动态监听（多根） ══════════════════ */
@@ -732,12 +776,27 @@
     if (!timer) timer = setTimeout(flushQueue, BATCH_DELAY);
   }
 
+  var QUEUE_CHUNK = 8;   // v1.0.4: 每批处理节点数，避免一次性阻塞主线程
+  var queueRest = null;    // 分块处理时的剩余节点
+
   function flushQueue() {
     timer = 0;
-    var arr = Array.from(queue);
+    // 合并上一轮剩余与新增队列，保证不丢节点
+    var arr = queueRest ? queueRest.concat(Array.from(queue)) : Array.from(queue);
+    queueRest = null;
     queue.clear();
-    for (var i = 0; i < arr.length; i++) {
-      try { processRootDeep(arr[i]); } catch (e) { }
+    var batchEnd = Math.min(QUEUE_CHUNK, arr.length);
+    for (var i = 0; i < batchEnd; i++) {
+      var n = arr[i];
+      if (!n) continue;
+      if (n.nodeType === 3 && !n.parentNode) continue;
+      if (n.nodeType === 1 && !n.isConnected) continue;
+      try { processRootDeep(n); } catch (e) { }
+    }
+    if (batchEnd < arr.length) {
+      // v1.0.4: 还有剩余 → 暂存并在下一个宏任务继续，让出主线程
+      queueRest = arr.slice(batchEnd);
+      timer = setTimeout(flushQueue, 0);
     }
   }
 
@@ -760,6 +819,7 @@
     if (mo) { mo.disconnect(); mo = null; }
     observedRoots = new WeakSet();
     queue.clear();
+    queueRest = null;   // v1.0.4: 清空分块处理中的剩余节点
     if (timer) { clearTimeout(timer); timer = 0; }
   }
 
@@ -972,6 +1032,10 @@
     if (v === false) return;
     checkCount++;
     checkQueue.push({ url: url, a: a });
+    // v1.0.4: 有新任务时重置 pump 计时器并立即唤醒（即使当前处于降频长间隔）
+    if (pumpTimer) { clearTimeout(pumpTimer); pumpTimer = 0; }
+    pumpDelay = PUMP_LEVELS[0];
+    schedulePump();
   }
 
   function judgeStatus(st) {
@@ -1015,15 +1079,36 @@
     }
   }
 
+  var pumpDelay = 600;   // v1.0.4: 自适应间隔，空队列时降频
+  var PUMP_LEVELS = [600, 1200, 2500, 5000];
+
+  function pumpLoop() {
+    pumpTimer = 0;
+    if (!CHECK_DEAD || !isEnabled() || document.hidden) { pumpDelay = 5000; schedulePump(); return; }
+    pump();
+    // 队列耗尽 → 逐步降频；有新任务入队 → 下次恢复密集轮询
+    var hasWork = checkQueue.length > 0;
+    if (hasWork) pumpDelay = PUMP_LEVELS[0];
+    else {
+      var idx = PUMP_LEVELS.indexOf(pumpDelay);
+      if (idx >= 0 && idx < PUMP_LEVELS.length - 1) pumpDelay = PUMP_LEVELS[idx + 1];
+    }
+    schedulePump();
+  }
+
+  function schedulePump() {
+    if (pumpTimer) return;
+    pumpTimer = setTimeout(pumpLoop, pumpDelay);
+  }
+
   function startChecker() {
     if (!CHECK_DEAD) return;
     if (pumpTimer) return;
-    setTimeout(function () { if (isEnabled()) pump(); }, CHECK_START_DELAY);
-    pumpTimer = setInterval(pump, 600);
+    setTimeout(function () { if (isEnabled()) schedulePump(); }, CHECK_START_DELAY);
   }
 
   function stopChecker() {
-    if (pumpTimer) { clearInterval(pumpTimer); pumpTimer = 0; }
+    if (pumpTimer) { clearTimeout(pumpTimer); pumpTimer = 0; }
     checkQueue = [];
     checking = 0;
     cacheSave();
@@ -1035,6 +1120,13 @@
     if (document.visibilityState === "hidden") {
       cacheSave();
       if (rulesDirty) { rulesDirty = false; saveRules(); }
+    } else {
+      // v1.0.4: 页面恢复可见时立即唤醒失效检测与兜底扫描
+      if (isEnabled()) {
+        if (pumpTimer) { clearTimeout(pumpTimer); pumpTimer = 0; }
+        pumpDelay = PUMP_LEVELS[0];
+        schedulePump();
+      }
     }
   });
 
@@ -1511,7 +1603,7 @@
     h.textContent = title;
     var ver = document.createElement("span");
     ver.className = "lfa-head-ver";
-    ver.textContent = "v1.0.4";
+    ver.textContent = "v1.0.5";
     var closeBtn = document.createElement("span");
     closeBtn.className = "lfa-close";
     closeBtn.textContent = "✕";
@@ -2013,24 +2105,106 @@
     toast(codeFound ? "已转换为链接（含提取码：" + codeFound + "）" : "已转换为链接：" + built.href);
   }
 
-  /* ══════════════════ Alt+点击 复制原文 ══════════════════ */
+  /* ══════════════════ Alt+点击 复制原文 / Ctrl+点击 直链跳转 ══════════════════ */
+
+  // Ctrl+点击直链跳转：从点击位置的文本中提取 URL 并直接跳转
+  // 与 Alt+点击（复制原文）互不冲突；专门用于那些被防误判逻辑
+  // 跳过的明文文本（如二段裸域名 example.com、文件名 app.zip 等）
+  function extractDirectUrl(text) {
+    if (!text || text.length < 6) return null;
+    // 第一步：复用主识别正则提取 URL
+    // 注意：这里不做文件名否决，直链跳转更宽松
+    MAIN_RE.lastIndex = 0;
+    var m;
+    while ((m = MAIN_RE.exec(text)) !== null) {
+      if (m.index === MAIN_RE.lastIndex) MAIN_RE.lastIndex++;
+      var raw = trimLoose(m[0]);
+      if (!raw || raw.length < 6) continue;
+      var href = toHref(raw);
+      if (href) return { raw: raw, href: href };
+    }
+    // 第二步：兜底处理主正则未覆盖的情况
+    //  - 二段裸域名（example.com）——脚本默认不自动转换
+    //  - 带文件扩展名的地址（app.zip）——被文件名否决跳过
+    // 这些场景恰好是直链跳转要补的
+    var cand = [];
+    // 从文本中找可能是裸域名/文件的片段
+    var tokenRe = /(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,24}(?:\/[\w\-.\/%?#@!$&'()*+,;=~]*)?/g;
+    tokenRe.lastIndex = 0;
+    var tm;
+    while ((tm = tokenRe.exec(text)) !== null) {
+      var tok = trimLoose(tm[0]);
+      if (tok && tok.length >= 6) cand.push(tok);
+    }
+    // 优先尝试完整片段，再逐个尝试
+    var full = trimLoose(text);
+    if (full.length >= 6 && full.length <= 300) cand.unshift(full);
+    for (var i = 0; i < cand.length; i++) {
+      var h = toHref(cand[i]);
+      if (h) return { raw: cand[i], href: h };
+    }
+    return null;
+  }
+
+  // 从点击事件定位具体文本位置，提取该位置附近的 URL
+  function textAtPoint(e) {
+    // caretPositionFromPoint（Firefox）
+    try {
+      var pos = document.caretPositionFromPoint(e.clientX, e.clientY);
+      if (pos && pos.offsetNode) return pos.offsetNode;
+    } catch (err) { }
+    // caretRangeFromPoint（Chrome / Edge / Safari）
+    try {
+      if (document.caretRangeFromPoint) {
+        var rng = document.caretRangeFromPoint(e.clientX, e.clientY);
+        if (rng && rng.startContainer) return rng.startContainer;
+      }
+    } catch (err) { }
+    // 兜底：直接返回点击目标
+    return e.target;
+  }
+
+  function directJump(e) {
+    var node = textAtPoint(e);
+    if (!node) return;
+    // 跳过链接元素内部（已有 href 的 <a>），避免干扰正常链接行为
+    // 文本节点需要向上找最近的元素节点再做 closest 判断
+    var el = node.nodeType === 1 ? node : (node.parentElement || null);
+    if (el && el.closest && el.closest("a[href]")) return;
+    // 文本节点或元素节点：从其文本中提取 URL
+    var txt = (node.nodeType === 3 ? (node.nodeValue || '') : (node.textContent || '')).trim();
+    if (txt.length > 300) txt = txt.slice(0, 300);
+    if (!txt) return;
+    var hit = extractDirectUrl(txt);
+    if (!hit) return;
+    e.preventDefault();
+    e.stopPropagation();
+    window.open(hit.href, '_blank', 'noopener,noreferrer');
+    toast('直链跳转：' + hit.href);
+  }
 
   var eventsBound = false;
   function bindEvents() {
     if (eventsBound) return;
     eventsBound = true;
     document.addEventListener("click", function (e) {
-      if (!e.altKey) return;
-      var t = e.target;
-      if (!(t && t.closest)) return;
-      var a = t.closest("a[data-lfa]");
-      if (!a) return;
-      e.preventDefault();
-      e.stopPropagation();
-      var raw = a.getAttribute("data-raw") || a.textContent;
-      var code = a.getAttribute("data-code");
-      GM_setClipboard(code ? raw + " 提取码:" + code : raw);
-      toast(code ? "已复制原文及提取码：" + raw + "（" + code + "）" : "已复制原始文本：" + raw);
+      if (e.altKey) {
+        var t = e.target;
+        if (!(t && t.closest)) return;
+        var a = t.closest("a[data-lfa]");
+        if (!a) return;
+        e.preventDefault();
+        e.stopPropagation();
+        var raw = a.getAttribute("data-raw") || a.textContent;
+        var code = a.getAttribute("data-code");
+        GM_setClipboard(code ? raw + " 提取码:" + code : raw);
+        toast(code ? "已复制原文及提取码：" + raw + "（" + code + "）" : "已复制原始文本：" + raw);
+        return;
+      }
+      // Ctrl+点击 直链跳转
+      if (e.ctrlKey && !e.metaKey) {
+        directJump(e);
+      }
     }, true);
   }
 
