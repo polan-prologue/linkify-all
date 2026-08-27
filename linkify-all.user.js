@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Linkify All - 明文链接自动转换
 // @namespace    local.linkify.all
-// @version      1.0.0
+// @version      1.0.1
 // @description  把任意网页中的明文网址自动变成可点击链接：全站生效、子域名识别、场景开关、学习规则、网盘提取码自动填入、失效链接检测、WebDAV 版本化云备份。零依赖纯本地。
 // @author       polan-prologue
 // @match        *://*/*
@@ -98,6 +98,11 @@
   var CODE_RE_NG = new RegExp(CODE_LABEL + CODE_BODY, "i");
   var CODE_RE_G = new RegExp(CODE_LABEL + CODE_BODY, "gi");
   var CODE_STOP = { http: 1, https: 1, www: 1, com: 1, cn: 1, net: 1, org: 1, html: 1, bv: 1, av: 1, html5: 1 };
+
+  // v1.0.1 修复：部分站点/复制链路会在 URL 中段夹带零宽字符（软连字符、
+  // 零宽空格等，肉眼不可见），本用于打断自动识别，却使正则在中途截断，
+  // 产生 "https://host首段" 这类残缺短链。这些字符不影响显示，统一剥离。
+  var INVISIBLE_RE = /[\u00AD\u200B-\u200F\u2060\uFEFF]/g;
 
   /* ══════════════════ 场景开关与排除规则 ══════════════════ */
 
@@ -475,6 +480,10 @@
 
   function processTextNode(node) {
     var text = node.nodeValue;
+    if (INVISIBLE_RE.test(text)) {
+      text = text.replace(INVISIBLE_RE, "");   // v1.0.1: 剥离零宽字符后再匹配
+      try { node.nodeValue = text; } catch (e) { }
+    }
     if (!text || text.length < 6 || text.length > MAX_TEXT_LENGTH) return false;
     if (!node.parentNode) return false;
     if (isSkippable(node)) return false;
@@ -1319,7 +1328,7 @@
     h.textContent = title;
     var ver = document.createElement("span");
     ver.className = "lfa-head-ver";
-    ver.textContent = "v1.0.0";
+    ver.textContent = "v1.0.1";
     var closeBtn = document.createElement("span");
     closeBtn.className = "lfa-close";
     closeBtn.textContent = "✕";
