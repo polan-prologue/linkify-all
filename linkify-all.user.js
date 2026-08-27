@@ -373,7 +373,7 @@
   /* ══════════════════ 核心：文本节点转换 ══════════════════ */
 
   // 疑似文件扩展名黑名单：无协议候选以此结尾 → 视为文件名而非网址，不转换。
-  // v0.17 修复：GitHub release 附件名 WorkDaddy-1.0.17-win64.zip 被子域名分支
+  // v1.0 修复：GitHub release 附件名 WorkDaddy-1.0.17-win64.zip 被子域名分支
   // 误判成 https://workdaddy-1.0.17-win64.zip/（.zip/.mov/.app 均已开放为 gTLD，
   // 但作为文件名远比真站常见，故否决优先）。
   var FILE_EXT_BLACKLIST = {
@@ -1319,7 +1319,7 @@
     h.textContent = title;
     var ver = document.createElement("span");
     ver.className = "lfa-head-ver";
-    ver.textContent = "v0.17.0";
+    ver.textContent = "v1.0.0";
     var closeBtn = document.createElement("span");
     closeBtn.className = "lfa-close";
     closeBtn.textContent = "✕";
