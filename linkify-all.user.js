@@ -2,7 +2,7 @@
 // @name         Linkify All - 明文链接自动转换
 // @namespace    local.linkify.all
 // @version      1.0.0
-// @description  把任意网页中的明文 URL 文本自动变成可点击的链接。v0.17：修复 GitHub release 附件名（如 WorkDaddy-1.0.17-win64.zip）被误判为网址；文件扩展名黑名单否决。另含子域名识别、Shadow DOM 穿透、网盘提取码、失效链接检测、版本化云备份。
+// @description  把任意网页中的明文网址自动变成可点击链接：全站生效、子域名识别、场景开关、学习规则、网盘提取码自动填入、失效链接检测、WebDAV 版本化云备份。零依赖纯本地。
 // @author       polan-prologue
 // @match        *://*/*
 // @run-at       document-idle
