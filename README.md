@@ -23,9 +23,13 @@
 
 ## 安装
 
-1. 浏览器安装 [Tampermonkey](https://www.tampermonkey.net/) 扩展
-2. 打开 Tampermonkey 管理面板 → 新建脚本 → 粘贴 [`linkify-all.user.js`](./linkify-all.user.js) 全部内容 → 保存
-3. 或直接拖拽 `.user.js` 文件到浏览器完成安装
+需先安装 [Tampermonkey](https://www.tampermonkey.net/) 浏览器扩展，然后：
+
+**👉 [点此安装 Linkify All](https://raw.githubusercontent.com/polan-prologue/linkify-all/main/linkify-all.user.js)**
+
+（点击后油猴会自动弹出安装确认页，点「安装」即可。以后升级也是点同一链接。）
+
+也可以手动安装：打开 Tampermonkey 管理面板 → 新建脚本 → 粘贴 [`linkify-all.user.js`](./linkify-all.user.js) 全部内容 → 保存。
 
 要求：Chrome / Edge 等 Chromium 内核浏览器（使用 ES2020 特性，Firefox 未适配）。
 
