@@ -58,7 +58,12 @@
 
 ### 方式一：一键安装（推荐）
 
-**👉 [点此安装 Linkify All](https://raw.githubusercontent.com/polan-prologue/linkify-all/main/linkify-all.user.js)**
+按网络环境任选其一，两个地址的脚本内容完全一致：
+
+- **国内网络（推荐，CNB 直连更快）**
+  **👉 [点此安装 Linkify All](https://cnb.cool/xkelin/LinkifyAll/-/git/raw/main/linkify-all.user.js)**
+- **国际网络 / GitHub**
+  **👉 [点此安装 Linkify All](https://raw.githubusercontent.com/polan-prologue/linkify-all/main/linkify-all.user.js)**
 
 点击后 Tampermonkey 会自动弹出安装确认页，点「安装」即可。以后升级也是点同一个链接。
 
