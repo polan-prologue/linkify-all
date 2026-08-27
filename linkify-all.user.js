@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Linkify All - 明文链接自动转换
 // @namespace    local.linkify.all
-// @version      1.0.1
+// @version      1.0.2
 // @description  把任意网页中的明文网址自动变成可点击链接：全站生效、子域名识别、场景开关、学习规则、网盘提取码自动填入、失效链接检测、WebDAV 版本化云备份。零依赖纯本地。
 // @author       polan-prologue
 // @match        *://*/*
@@ -413,7 +413,7 @@
       if (looksLikeFileName(raw)) continue;
       var href = toHref(raw);
       if (!href) continue;
-      out.push({ start: m.index, end: m.index + raw.length, raw: raw, href: href });
+      out.push({ start: m.index, end: m.index + raw.length, mend: m.index + m[0].length, raw: raw, href: href });
     }
     return out;
   }
@@ -478,6 +478,63 @@
     return a;
   }
 
+  /* ── v1.0.2：跨节点续接 ──
+   * 内容平台会把链接文本拆进多个相邻内联节点（甚至中间插入平台自带的局部
+   * 链接），单节点匹配只能看到 "https://host首段" 这类残缺片段。策略：
+   * ① 命中延伸到节点末尾且主机名不完整 → 向后收集兄弟节点中的 URL 字符
+   *    前缀，续接成完整链接，整块替换并吞并被消费的兄弟节点；
+   * ② 续接不成 → 抑制该命中，宁可不转也不出残缺短链；
+   * ③ 完整链接即使恰好结尾于节点末尾也不续接，避免误吞无关后续文本。 */
+
+  var CONT_URL_RE = /^[A-Za-z0-9._~:/?#@!$&'()*+,;=\-[\]%]+/;
+  var INLINE_TAGS = { SPAN: 1, A: 1, B: 1, I: 1, EM: 1, STRONG: 1, U: 1, S: 1, CODE: 1, SMALL: 1, LABEL: 1, FONT: 1, WBR: 1, MARK: 1 };
+
+  function hostIncomplete(raw) {
+    var mh = /^https?:\/\/([^/?#]+)/i.exec(raw);
+    if (!mh) return false;
+    var labels = mh[1].split(".");
+    if (labels.length < 2) return true;   // 主机无点 → 明显残缺
+    return labels[labels.length - 1].length < 2;
+  }
+
+  // 内联包裹穿透：文本节点若被 <span> 等内联元素包住且是该元素末尾，
+  // 从最外层内联祖先开始找续接（不跨块级元素/根容器）
+  function inlineEndNode(node) {
+    var n = node;
+    while (n && n.parentNode) {
+      var p = n.parentNode;
+      if (p.nodeType !== 1) break;
+      var kids = p.childNodes, last = false;
+      for (var i = kids.length - 1; i >= 0; i--) { if (kids[i] === n) { last = i === kids.length - 1; break; } }
+      if (!last) break;
+      var tag = p.tagName || "";
+      if (!INLINE_TAGS[tag] && tag.indexOf("-") === -1) break;
+      n = p;
+    }
+    return n;
+  }
+
+  // 收集 node 之后兄弟内容中可续接的 URL 字符前缀；
+  // 文本节点可部分消费（改写 nodeValue），元素节点仅整块消费
+  function collectContinuation(node) {
+    var str = "", parts = [], sib = node.nextSibling, guard = 0;
+    while (sib && guard++ < 6 && str.length < 500) {
+      if (sib.nodeType === 1 && sib.getAttribute && sib.getAttribute("data-lfa")) break;
+      var t = sib.nodeType === 3 ? (sib.nodeValue || "") : (sib.textContent || "");
+      if (!t) { sib = sib.nextSibling; continue; }
+      var mc = CONT_URL_RE.exec(t);
+      var take = mc ? mc[0] : "";
+      if (!take) break;
+      var partial = take.length < t.length;
+      if (partial && sib.nodeType !== 3) break;   // 元素只整块消费
+      parts.push({ node: sib, len: take.length, partial: partial });
+      str += take;
+      if (partial) break;
+      sib = sib.nextSibling;
+    }
+    return { str: str, parts: parts };
+  }
+
   function processTextNode(node) {
     var text = node.nodeValue;
     if (INVISIBLE_RE.test(text)) {
@@ -491,9 +548,27 @@
 
     var urlHits = findUrls(text);
     for (var k = 0; k < urlHits.length; k++) urlHits[k].code = findCodeNear(text, urlHits, k);
+    var removeParts = null;
+    if (urlHits.length) {
+      var lastHit = urlHits[urlHits.length - 1];
+      if (lastHit.mend >= text.length && hostIncomplete(lastHit.raw)) {
+        var cont = collectContinuation(inlineEndNode(node));
+        var stitched = trimTrailing(text.slice(lastHit.start) + cont.str);
+        var shref = stitched ? toHref(stitched) : null;
+        if (cont.str && shref && stitched.length > lastHit.raw.length + 1) {
+          lastHit.raw = stitched;
+          lastHit.href = shref;
+          lastHit.end = text.length;
+          removeParts = cont.parts;
+        } else {
+          lastHit.suppressed = true;
+        }
+      }
+    }
     var ruleHits = findRuleHits(text);
 
-    var merged = urlHits.slice();
+    var merged = [];
+    for (var k2 = 0; k2 < urlHits.length; k2++) if (!urlHits[k2].suppressed) merged.push(urlHits[k2]);
     for (var q = 0; q < ruleHits.length; q++) {
       var rh = ruleHits[q];
       var overlap = false;
@@ -516,6 +591,17 @@
     if (pos < text.length) frag.appendChild(document.createTextNode(text.slice(pos)));
 
     node.parentNode.replaceChild(frag, node);
+    if (removeParts) {
+      for (var rp = 0; rp < removeParts.length; rp++) {
+        var part = removeParts[rp], pn = part.node;
+        if (!pn.parentNode) continue;
+        if (part.partial && pn.nodeType === 3) {
+          try { pn.nodeValue = (pn.nodeValue || "").slice(part.len); } catch (e) { }
+        } else {
+          pn.parentNode.removeChild(pn);
+        }
+      }
+    }
     return true;
   }
 
@@ -1328,7 +1414,7 @@
     h.textContent = title;
     var ver = document.createElement("span");
     ver.className = "lfa-head-ver";
-    ver.textContent = "v1.0.1";
+    ver.textContent = "v1.0.2";
     var closeBtn = document.createElement("span");
     closeBtn.className = "lfa-close";
     closeBtn.textContent = "✕";
