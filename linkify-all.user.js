@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Linkify All - 明文链接自动转换
 // @namespace    local.linkify.all
-// @version      1.0.2
+// @version      1.0.3
 // @description  把任意网页中的明文网址自动变成可点击链接：全站生效、子域名识别、场景开关、学习规则、网盘提取码自动填入、失效链接检测、WebDAV 版本化云备份。零依赖纯本地。
 // @author       polan-prologue
 // @match        *://*/*
@@ -52,10 +52,10 @@
   var MAX_SHADOW_DEPTH = 20;
 
   var CHECK_DEAD = true;
-  var CHECK_MAX_PER_PAGE = 50;
+  var CHECK_MAX_PER_PAGE = 20;      // v1.0.3: 50 → 20，降低链接密集页探测压力
   var CHECK_CONCURRENCY = 2;
   var CHECK_TIMEOUT = 9000;
-  var CHECK_START_DELAY = 1200;
+  var CHECK_START_DELAY = 2500;     // v1.0.3: 1200 → 2500，避开页面加载尖峰
   var CACHE_TTL = 24 * 3600 * 1000;
   var CACHE_KEY = "lfa_deadcache";
   var CACHE_SAVE_MAX = 500;
@@ -115,8 +115,10 @@
     return v !== false;
   }
 
+  var skipCache = new WeakMap();   // v1.0.3: 父元素 → 祖先链 skippable 判定缓存
   function setOpt(k, on) {
     try { GM_setValue("lfa_opt_" + k, !!on); } catch (e) { }
+    skipCache = new WeakMap();     // 场景开关变化后判定失效，整表重建
   }
 
   function allOpts() {
@@ -145,9 +147,23 @@
     return false;
   }
 
+  // v1.0.3：按直接父元素缓存祖先链判定——同一父元素下的文本节点不重复爬链，
+  // 重复扫描/兄弟节点密集时大幅削减开销；场景开关变化（setOpt/reapply）时重建
+  function isSkippableCached(node) {
+    var p = node && node.parentNode;
+    if (!p || p.nodeType !== 1) return isSkippable(node);
+    var v = skipCache.get(p);
+    if (v === undefined) {
+      v = isSkippable(node) ? 1 : 0;
+      try { skipCache.set(p, v); } catch (e) { }
+    }
+    return v === 1;
+  }
+
   // 场景开关变化后的整页重处理（先还原再转换，保证前后一致）
   function reapply() {
     if (!isEnabled() || isBlacklisted(location.hostname)) return;
+    skipCache = new WeakMap();
     deactivate();
     unwrapAll();
     activate();
@@ -543,7 +559,7 @@
     }
     if (!text || text.length < 6 || text.length > MAX_TEXT_LENGTH) return false;
     if (!node.parentNode) return false;
-    if (isSkippable(node)) return false;
+    if (isSkippableCached(node)) return false;
     if (!textPrefilter(text)) return false;
 
     var urlHits = findUrls(text);
@@ -602,6 +618,7 @@
         }
       }
     }
+    sweepConverted++;
     return true;
   }
 
@@ -612,7 +629,7 @@
       acceptNode: function (n) {
         var v = n.nodeValue;
         if (!v || v.length < 6 || v.length > MAX_TEXT_LENGTH) return NodeFilter.FILTER_REJECT;
-        if (isSkippable(n)) return NodeFilter.FILTER_REJECT;
+        if (isSkippableCached(n)) return NodeFilter.FILTER_REJECT;
         if (!textPrefilter(v)) return NodeFilter.FILTER_REJECT;
         return NodeFilter.FILTER_ACCEPT;
       }
@@ -667,6 +684,7 @@
 
   function schedule(node) {
     if (internalWrite) return;
+    mutCount++;   // v1.0.3: 变更计数供兜底扫描门控使用
     queue.add(node);
     if (!timer) timer = setTimeout(flushQueue, BATCH_DELAY);
   }
@@ -714,22 +732,58 @@
     } catch (e) { }
   }
 
-  /* ══════════════════ 周期性兜底扫描 ══════════════════ */
+  /* ══════════════════ 周期性兜底扫描（v1.0.3：门控+降频+空闲调度） ══════════════════
+   * 观察器正常工作时页面变更持续计数；自上轮扫描后毫无变更的轮次直接跳过
+   * （连续跳过 4 轮强制保底一次，防观察器失效），零新转换的轮次逐级降频
+   * 2.5s→30s，一旦扫出新转换立即恢复密集保险。扫描本体放到浏览器空闲时段
+   * 执行（requestIdleCallback，2 秒兜底），不挤占渲染帧。 */
 
   var sweepTimer = 0;
+  var sweepDelay = SWEEP_INTERVAL;
+  var sweepIdleRounds = 0;
+  var sweepSkipStreak = 0;
+  var mutCount = 0;
+  var sweptMutCount = -1;
+  var sweepConverted = 0;
+  var SWEEP_LEVELS = [2500, 5000, 10000, 30000];
+
+  function sweepOnce() {
+    if (!isEnabled() || document.hidden || !document.body) return;
+    if (mutCount === sweptMutCount) {
+      if (++sweepSkipStreak < 4) return;
+    }
+    sweepSkipStreak = 0;
+    sweptMutCount = mutCount;
+    sweepConverted = 0;
+    try { processRootDeep(document.body); } catch (e) { }
+    if (sweepConverted > 0) sweepIdleRounds = 0;
+    else if (sweepIdleRounds < SWEEP_LEVELS.length - 1) sweepIdleRounds++;
+  }
 
   function startSweep() {
     if (sweepTimer) return;
-    sweepTimer = setInterval(function () {
-      if (!isEnabled() || document.hidden) return;
-      if (document.body) {
-        try { processRootDeep(document.body); } catch (e) { }
+    var step = function () {
+      sweepTimer = 0;
+      var run = function () {
+        sweepOnce();
+        sweepDelay = SWEEP_LEVELS[sweepIdleRounds];
+        startSweep();
+      };
+      if (typeof requestIdleCallback === "function") {
+        sweepTimer = requestIdleCallback(function () { run(); }, { timeout: 2000 });
+      } else {
+        run();
       }
-    }, SWEEP_INTERVAL);
+    };
+    sweepTimer = setTimeout(step, sweepDelay);
   }
 
   function stopSweep() {
-    if (sweepTimer) { clearInterval(sweepTimer); sweepTimer = 0; }
+    if (sweepTimer) {
+      clearTimeout(sweepTimer);
+      if (typeof cancelIdleCallback === "function") { try { cancelIdleCallback(sweepTimer); } catch (e) { } }
+      sweepTimer = 0;
+    }
   }
 
   /* ══════════════════ 样式 & 提示气泡 ══════════════════ */
@@ -902,7 +956,7 @@
   }
 
   function pump() {
-    if (!CHECK_DEAD || !isEnabled()) return;
+    if (!CHECK_DEAD || !isEnabled() || document.hidden) return;
     while (checking < CHECK_CONCURRENCY && checkQueue.length > 0) {
       var item = checkQueue.shift();
       if (!item.a.isConnected) continue;
@@ -1414,7 +1468,7 @@
     h.textContent = title;
     var ver = document.createElement("span");
     ver.className = "lfa-head-ver";
-    ver.textContent = "v1.0.2";
+    ver.textContent = "v1.0.3";
     var closeBtn = document.createElement("span");
     closeBtn.className = "lfa-close";
     closeBtn.textContent = "✕";
@@ -1981,7 +2035,8 @@
         setOpt: setOpt,
         reapply: reapply,
         openSettings: settingsDialog,
-        openLearn: learnDialog
+        openLearn: learnDialog,
+        sweepState: function () { return { delay: sweepDelay, idle: sweepIdleRounds, mut: mutCount }; }
       };
     }
   } catch (e) { }
