@@ -38,6 +38,7 @@
  *   - WebDAV 云备份 / 恢复 / 设置（地址/账号/密码，凭据仅存本机）
  *
  * Alt + 点击转换出的链接 = 复制原始明文（链接含提取码时一并复制）
+ * Ctrl + 点击明文网址文本 = 直链跳转（含被防误判跳过的裸域名/文件名等）
  * ─────────────────────────────────────────────────────────────
  */
 
@@ -1970,24 +1971,106 @@
     toast(codeFound ? "已转换为链接（含提取码：" + codeFound + "）" : "已转换为链接：" + built.href);
   }
 
-  /* ══════════════════ Alt+点击 复制原文 ══════════════════ */
+  /* ══════════════════ Alt+点击 复制原文 / Ctrl+点击 直链跳转 ══════════════════ */
+
+  // Ctrl+点击直链跳转：从点击位置的文本中提取 URL 并直接跳转
+  // 与 Alt+点击（复制原文）互不冲突；专门用于那些被防误判逻辑
+  // 跳过的明文文本（如二段裸域名 example.com、文件名 app.zip 等）
+  function extractDirectUrl(text) {
+    if (!text || text.length < 6) return null;
+    // 第一步：复用主识别正则提取 URL
+    // 注意：这里不做文件名否决，直链跳转更宽松
+    MAIN_RE.lastIndex = 0;
+    var m;
+    while ((m = MAIN_RE.exec(text)) !== null) {
+      if (m.index === MAIN_RE.lastIndex) MAIN_RE.lastIndex++;
+      var raw = trimLoose(m[0]);
+      if (!raw || raw.length < 6) continue;
+      var href = toHref(raw);
+      if (href) return { raw: raw, href: href };
+    }
+    // 第二步：兜底处理主正则未覆盖的情况
+    //  - 二段裸域名（example.com）——脚本默认不自动转换
+    //  - 带文件扩展名的地址（app.zip）——被文件名否决跳过
+    // 这些场景恰好是直链跳转要补的
+    var cand = [];
+    // 从文本中找可能是裸域名/文件的片段
+    var tokenRe = /(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,24}(?:\/[\w\-.\/%?#@!$&'()*+,;=~]*)?/g;
+    tokenRe.lastIndex = 0;
+    var tm;
+    while ((tm = tokenRe.exec(text)) !== null) {
+      var tok = trimLoose(tm[0]);
+      if (tok && tok.length >= 6) cand.push(tok);
+    }
+    // 优先尝试完整片段，再逐个尝试
+    var full = trimLoose(text);
+    if (full.length >= 6 && full.length <= 300) cand.unshift(full);
+    for (var i = 0; i < cand.length; i++) {
+      var h = toHref(cand[i]);
+      if (h) return { raw: cand[i], href: h };
+    }
+    return null;
+  }
+
+  // 从点击事件定位具体文本位置，提取该位置附近的 URL
+  function textAtPoint(e) {
+    // caretPositionFromPoint（Firefox）
+    try {
+      var pos = document.caretPositionFromPoint(e.clientX, e.clientY);
+      if (pos && pos.offsetNode) return pos.offsetNode;
+    } catch (err) { }
+    // caretRangeFromPoint（Chrome / Edge / Safari）
+    try {
+      if (document.caretRangeFromPoint) {
+        var rng = document.caretRangeFromPoint(e.clientX, e.clientY);
+        if (rng && rng.startContainer) return rng.startContainer;
+      }
+    } catch (err) { }
+    // 兜底：直接返回点击目标
+    return e.target;
+  }
+
+  function directJump(e) {
+    var node = textAtPoint(e);
+    if (!node) return;
+    // 跳过链接元素内部（已有 href 的 <a>），避免干扰正常链接行为
+    // 文本节点需要向上找最近的元素节点再做 closest 判断
+    var el = node.nodeType === 1 ? node : (node.parentElement || null);
+    if (el && el.closest && el.closest("a[href]")) return;
+    // 文本节点或元素节点：从其文本中提取 URL
+    var txt = (node.nodeType === 3 ? (node.nodeValue || '') : (node.textContent || '')).trim();
+    if (txt.length > 300) txt = txt.slice(0, 300);
+    if (!txt) return;
+    var hit = extractDirectUrl(txt);
+    if (!hit) return;
+    e.preventDefault();
+    e.stopPropagation();
+    window.open(hit.href, '_blank', 'noopener,noreferrer');
+    toast('直链跳转：' + hit.href);
+  }
 
   var eventsBound = false;
   function bindEvents() {
     if (eventsBound) return;
     eventsBound = true;
     document.addEventListener("click", function (e) {
-      if (!e.altKey) return;
-      var t = e.target;
-      if (!(t && t.closest)) return;
-      var a = t.closest("a[data-lfa]");
-      if (!a) return;
-      e.preventDefault();
-      e.stopPropagation();
-      var raw = a.getAttribute("data-raw") || a.textContent;
-      var code = a.getAttribute("data-code");
-      GM_setClipboard(code ? raw + " 提取码:" + code : raw);
-      toast(code ? "已复制原文及提取码：" + raw + "（" + code + "）" : "已复制原始文本：" + raw);
+      if (e.altKey) {
+        var t = e.target;
+        if (!(t && t.closest)) return;
+        var a = t.closest("a[data-lfa]");
+        if (!a) return;
+        e.preventDefault();
+        e.stopPropagation();
+        var raw = a.getAttribute("data-raw") || a.textContent;
+        var code = a.getAttribute("data-code");
+        GM_setClipboard(code ? raw + " 提取码:" + code : raw);
+        toast(code ? "已复制原文及提取码：" + raw + "（" + code + "）" : "已复制原始文本：" + raw);
+        return;
+      }
+      // Ctrl+点击 直链跳转
+      if (e.ctrlKey && !e.metaKey) {
+        directJump(e);
+      }
     }, true);
   }
 
