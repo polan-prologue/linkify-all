@@ -1648,13 +1648,13 @@
     var ui = openPanel("🎓 学习新链接规则");
     pv_tip(ui.body, "窗口不挡页面：先选中页面文字再点「抓取选中文字」；原文本回车跳链接框，链接框回车提交；Esc 关闭。");
 
-    var rawIn = pv_field(ui.body, "原文本（页面上的明文，如 github:owner/repo）", "github:lxzy-7/dsh-plugin-guard", "");
+    var rawIn = pv_field(ui.body, "原文本（页面上的明文，如 app:abc-123）", "app:abc-123", "");
     var grab1 = document.createElement("div");
     grab1.style.cssText = "margin:-4px 0 4px;";
     ui.body.appendChild(grab1);
     pv_btn(grab1, "📌 抓取选中文字", "secondary", function () { grab(rawIn); });
 
-    var urlIn = pv_field(ui.body, "跳转链接（如 https://github.com/owner/repo）", "https://github.com/lxzy-7/dsh-plugin-guard", "");
+    var urlIn = pv_field(ui.body, "跳转链接（如 https://example.com/item/abc-123）", "https://example.com/item/abc-123", "");
     var grab2 = document.createElement("div");
     grab2.style.cssText = "margin:-4px 0 4px;";
     ui.body.appendChild(grab2);
