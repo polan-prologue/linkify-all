@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Linkify All - 明文链接自动转换
 // @namespace    local.linkify.all
-// @version      1.0.5
+// @version      1.0.6
 // @description  把任意网页中的明文网址自动变成可点击链接：全站生效、子域名识别、场景开关、学习规则、网盘提取码自动填入、失效链接检测、WebDAV 版本化云备份。零依赖纯本地。
 // @author       polan-prologue
 // @match        *://*/*
@@ -51,6 +51,8 @@
   var BATCH_DELAY = 150;
   var SWEEP_INTERVAL = 2500;
   var MAX_SHADOW_DEPTH = 20;
+  var SCAN_BUDGET_INIT = 20;     // v1.0.6: 初始全页扫描单轮主线程预算（ms），超预算剩余节点入队分批继续
+  var SCAN_BUDGET_SWEEP = 6;     // v1.0.6: 兜底扫描单轮预算（ms），大页面不在一次空闲回调里爬完全页
 
   var CHECK_DEAD = true;
   var CHECK_MAX_PER_PAGE = 20;      // v1.0.3: 50 → 20，降低链接密集页探测压力
@@ -117,8 +119,11 @@
   }
 
   var skipCache = new WeakMap();   // v1.0.3: 父元素 → 祖先链 skippable 判定缓存
+  var ownNodes = new WeakSet();    // v1.0.6: 本脚本创建的节点，MutationObserver 不再回处理
+  var optCache = null;             // v1.0.6: 场景开关内存快照，setOpt 时失效重建
   function setOpt(k, on) {
     try { GM_setValue("lfa_opt_" + k, !!on); } catch (e) { }
+    optCache = null;
     skipCache = new WeakMap();     // 场景开关变化后判定失效，整表重建
   }
 
@@ -128,16 +133,25 @@
     return out;
   }
 
+  // v1.0.6: 热路径共用快照。isSkippable 对每个文本节点都会调用，逐节点同步读
+  // GM 存储（IPC 往返开销大），改为一次读取、setOpt 时重建
+  function optSnapshot() {
+    if (!optCache) optCache = allOpts();
+    return optCache;
+  }
+
   function isSkippable(node) {
-    var precode = optOn("precode");
-    var editable = optOn("editable");
-    var control = optOn("control");
-    var linkinside = optOn("linkinside");
+    var o = optSnapshot();
+    var precode = o.precode, editable = o.editable, control = o.control, linkinside = o.linkinside;
     for (var n = node; n; n = n.parentNode) {
       if (n === document.body || n.nodeType === 11) break;
       if (n.nodeType !== 1) continue;
       var tag = n.tagName;
-      if (tag === "A" && !linkinside) return true;
+      if (tag === "A") {
+        // v1.0.6: 自身产出的链接恒定跳过——即使「已有链接内部」开启，也不对自己重复转换嵌套
+        if (n.getAttribute && n.getAttribute("data-lfa") === "1") return true;
+        if (!linkinside) return true;
+      }
       if ((tag === "PRE" || tag === "CODE") && !precode) return true;
       if ((tag === "TEXTAREA" || tag === "INPUT" || tag === "SELECT" || tag === "OPTION") && !editable) return true;
       if (tag === "BUTTON" && !control) return true;
@@ -410,6 +424,9 @@
   var PREFILTER_COMBINED = /:\/\/|www\.|[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\/|(?:[a-zA-Z0-9-]+\.){2,}[a-zA-Z]{2,}/;
 
   function textPrefilter(text) {
+    // v1.0.6: 不含 "." 也不含 ":" 的文本不可能命中任何 URL 分支（协议/域名/www 均含其一），
+    // 只需查学习规则探测，纯中文/纯文本节点不再跑完整预筛正则
+    if (text.indexOf(".") === -1 && text.indexOf(":") === -1) return ruleProbeHit(text);
     return PREFILTER_COMBINED.test(text) || ruleProbeHit(text);
   }
 
@@ -496,6 +513,13 @@
     return out;
   }
 
+  // v1.0.6: 本脚本创建的文本节点登记进 ownNodes，观察器不再回处理
+  function lfaTextNode(s) {
+    var t = document.createTextNode(s);
+    ownNodes.add(t);
+    return t;
+  }
+
   function buildAnchor(hit) {
     var a = document.createElement("a");
     var href = hit.href;
@@ -512,6 +536,7 @@
     if (hit.ruleId) a.setAttribute("data-rule", hit.ruleId);
     a.style.cursor = "pointer";
     a.style.textDecoration = "underline";
+    ownNodes.add(a);   // v1.0.6: 自身产物（锚点及其文本）不再触发观察器回处理
     enqueueDeadCheck(a);
     return a;
   }
@@ -616,7 +641,11 @@
     if (!textPrefilter(text)) return false;
 
     var urlHits = findUrls(text);
-    for (var k = 0; k < urlHits.length; k++) urlHits[k].code = findCodeNear(text, urlHits, k);
+    // v1.0.6: 提取码只对网盘链接有意义；非网盘命中不再做链接周边文本的补充正则搜索。
+    // 边界参数仍用原始命中数组，与旧行为完全一致
+    for (var k = 0; k < urlHits.length; k++) {
+      if (isPanUrl(urlHits[k].href)) urlHits[k].code = findCodeNear(text, urlHits, k);
+    }
     var removeParts = null;
     if (urlHits.length) {
       var lastHit = urlHits[urlHits.length - 1];
@@ -661,30 +690,36 @@
     var pos = 0;
     for (var i = 0; i < merged.length; i++) {
       var h = merged[i];
-      if (h.start > pos) frag.appendChild(document.createTextNode(text.slice(pos, h.start)));
+      if (h.start > pos) frag.appendChild(lfaTextNode(text.slice(pos, h.start)));
       frag.appendChild(buildAnchor(h));
       pos = h.end;
     }
-    if (pos < text.length) frag.appendChild(document.createTextNode(text.slice(pos)));
+    if (pos < text.length) frag.appendChild(lfaTextNode(text.slice(pos)));
 
-    node.parentNode.replaceChild(frag, node);
-    if (removeParts) {
-      for (var rp = 0; rp < removeParts.length; rp++) {
-        var part = removeParts[rp], pn = part.node;
-        if (!pn.parentNode) continue;
-        if (part.partial && pn.nodeType === 3) {
-          try { pn.nodeValue = (pn.nodeValue || "").slice(part.len); } catch (e) { }
-        } else if (part.partial && pn.nodeType === 1) {
-          // 元素部分消费：保留包裹与残余正文，仅剔除已被并走的 URL 前缀
-          var remain = (part.orig || "").slice(part.len);
-          try {
-            while (pn.firstChild) pn.removeChild(pn.firstChild);
-            if (remain) pn.appendChild(document.createTextNode(remain));
-          } catch (e) { }
-        } else {
-          pn.parentNode.removeChild(pn);
+    // v1.0.6: 转换写入自身 DOM 时挂 internalWrite，本脚本产物不再回流观察器队列
+    internalWrite = true;
+    try {
+      node.parentNode.replaceChild(frag, node);
+      if (removeParts) {
+        for (var rp = 0; rp < removeParts.length; rp++) {
+          var part = removeParts[rp], pn = part.node;
+          if (!pn.parentNode) continue;
+          if (part.partial && pn.nodeType === 3) {
+            try { pn.nodeValue = (pn.nodeValue || "").slice(part.len); } catch (e) { }
+          } else if (part.partial && pn.nodeType === 1) {
+            // 元素部分消费：保留包裹与残余正文，仅剔除已被并走的 URL 前缀
+            var remain = (part.orig || "").slice(part.len);
+            try {
+              while (pn.firstChild) pn.removeChild(pn.firstChild);
+              if (remain) pn.appendChild(lfaTextNode(remain));
+            } catch (e) { }
+          } else {
+            pn.parentNode.removeChild(pn);
+          }
         }
       }
+    } finally {
+      internalWrite = false;
     }
     sweepConverted++;
     return true;
@@ -714,16 +749,18 @@
     for (var i = 0; i < nodes.length; i++) processTextNode(nodes[i]);
   }
 
-  function processRootDeep(root, depth) {
+  // budgetMs 给定时为单轮主线程预算：超时即停，剩余文本节点转入队列分块处理，
+  // 调用方据此知道本轮是否被迫中断（返回 true）。不传 budgetMs 则整树一次扫完。
+  function processRootDeep(root, depth, budgetMs) {
     depth = depth || 0;
-    if (!root || depth > MAX_SHADOW_DEPTH) return;
-    if (root.nodeType === 3) { processTextNode(root); return; }
-    if (root.nodeType !== 1 && root.nodeType !== 9 && root.nodeType !== 11) return;
+    if (!root || depth > MAX_SHADOW_DEPTH) return false;
+    if (root.nodeType === 3) { processTextNode(root); return false; }
+    if (root.nodeType !== 1 && root.nodeType !== 9 && root.nodeType !== 11) return false;
     // v1.0.4: 跳过已脱离文档的节点，避免处理无效 DOM 子树
-    if (root.nodeType === 1 && root !== document.documentElement && root !== document.body && !root.isConnected) return;
+    if (root.nodeType === 1 && root !== document.documentElement && root !== document.body && !root.isConnected) return false;
     if (root.nodeType === 1 && root.shadowRoot) {
       observeRoot(root.shadowRoot);
-      processRootDeep(root.shadowRoot, depth + 1);
+      processRootDeep(root.shadowRoot, depth + 1, budgetMs);
     }
     // v1.0.4: 单次遍历同时收集文本节点和 Shadow DOM 宿主，避免双树遍历
     var textNodes = [], hosts = [];
@@ -731,6 +768,9 @@
       var w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT, {
         acceptNode: function (n) {
           if (n.nodeType === 3) {
+            // v1.0.6: 本脚本链接内的文本直接拒绝——免去祖先链判定与预筛（兜底扫描高频路径）
+            var p0 = n.parentNode;
+            if (p0 && p0.nodeType === 1 && p0.getAttribute && p0.getAttribute("data-lfa") === "1") return NodeFilter.FILTER_REJECT;
             var v = n.nodeValue;
             if (!v || v.length < 6 || v.length > MAX_TEXT_LENGTH) return NodeFilter.FILTER_REJECT;
             if (isSkippableCached(n)) return NodeFilter.FILTER_REJECT;
@@ -748,8 +788,21 @@
         if (node.nodeType === 3) textNodes.push(node);
       }
     } catch (err) { }
-    for (var i = 0; i < textNodes.length; i++) processTextNode(textNodes[i]);
-    for (var j = 0; j < hosts.length; j++) processRootDeep(hosts[j], depth + 1);
+    var deadline = budgetMs ? Date.now() + budgetMs : 0;
+    var i = 0;
+    for (; i < textNodes.length; i++) {
+      if (deadline && (i & 63) === 0 && Date.now() > deadline) break;
+      processTextNode(textNodes[i]);
+    }
+    var bailed = deadline !== 0 && i < textNodes.length;
+    if (bailed) {
+      // v1.0.6: 剩余节点入队分批处理（每批 8 个 + 宏任务让出），不阻塞渲染也不丢节点
+      for (var r = i; r < textNodes.length; r++) schedule(textNodes[r]);
+    } else {
+      // 预算沿宿主递归传递：Shadow 子树同样受限，扫不玩的剩余部分入队续扫
+      for (var j = 0; j < hosts.length; j++) processRootDeep(hosts[j], depth + 1, budgetMs);
+    }
+    return bailed;
   }
 
   /* ══════════════════ 动态监听（多根） ══════════════════ */
@@ -757,6 +810,7 @@
   var mo = null;
   var observedRoots = new WeakSet();
   var queue = new Set();
+  var pending = new Set();   // v1.0.6: 队列+余量的全部待处理节点，供观察器批内祖先去重
   var timer = 0;
   var internalWrite = false;
 
@@ -771,8 +825,10 @@
 
   function schedule(node) {
     if (internalWrite) return;
+    if (ownNodes.has(node)) return;   // v1.0.6: 自身产物不入队
     mutCount++;   // v1.0.3: 变更计数供兜底扫描门控使用
     queue.add(node);
+    pending.add(node);
     if (!timer) timer = setTimeout(flushQueue, BATCH_DELAY);
   }
 
@@ -785,6 +841,7 @@
     var arr = queueRest ? queueRest.concat(Array.from(queue)) : Array.from(queue);
     queueRest = null;
     queue.clear();
+    pending.clear();
     var batchEnd = Math.min(QUEUE_CHUNK, arr.length);
     for (var i = 0; i < batchEnd; i++) {
       var n = arr[i];
@@ -796,6 +853,7 @@
     if (batchEnd < arr.length) {
       // v1.0.4: 还有剩余 → 暂存并在下一个宏任务继续，让出主线程
       queueRest = arr.slice(batchEnd);
+      for (var r2 = 0; r2 < queueRest.length; r2++) pending.add(queueRest[r2]);
       timer = setTimeout(flushQueue, 0);
     }
   }
@@ -803,12 +861,25 @@
   function startObserve() {
     if (mo) { observeRoot(document.body); return; }
     mo = new MutationObserver(function (muts) {
+      if (internalWrite) return;   // v1.0.6: 自身写入窗口内的回调整批跳过
+      // v1.0.6: 先整批收集再统一去重：同批同时新增「父容器+子节点」时只处理父容器，
+      // 且已待处理的祖先覆盖其子孙节点——框架/页面批量插大树不再对重叠子树重复爬取
+      var into = [];
       for (var i = 0; i < muts.length; i++) {
         var added = muts[i].addedNodes;
         for (var j = 0; j < added.length; j++) {
           var n = added[j];
-          if (n.nodeType === 1 || n.nodeType === 3) schedule(n);
+          if (n.nodeType === 1 || n.nodeType === 3) into.push(n);
         }
+      }
+      for (var k = 0; k < into.length; k++) {
+        var nd = into[k];
+        if (pending.has(nd) || ownNodes.has(nd)) continue;
+        var covered = false;
+        for (var p = nd.parentNode; p && p.nodeType !== 9 && p !== document.body; p = p.parentNode) {
+          if (pending.has(p)) { covered = true; break; }
+        }
+        if (!covered) schedule(nd);
       }
     });
     observedRoots = new WeakSet();
@@ -819,6 +890,7 @@
     if (mo) { mo.disconnect(); mo = null; }
     observedRoots = new WeakSet();
     queue.clear();
+    pending.clear();
     queueRest = null;   // v1.0.4: 清空分块处理中的剩余节点
     if (timer) { clearTimeout(timer); timer = 0; }
   }
@@ -858,8 +930,10 @@
     sweepSkipStreak = 0;
     sweptMutCount = mutCount;
     sweepConverted = 0;
-    try { processRootDeep(document.body); } catch (e) { }
-    if (sweepConverted > 0) sweepIdleRounds = 0;
+    var bailed = false;
+    try { bailed = processRootDeep(document.body, 0, SCAN_BUDGET_SWEEP); } catch (e) { }
+    // v1.0.6: 超预算被迫中断说明还有存量待扫，保持当前档位继续，不计为「空闲轮次」
+    if (sweepConverted > 0 || bailed) sweepIdleRounds = 0;
     else if (sweepIdleRounds < SWEEP_LEVELS.length - 1) sweepIdleRounds++;
   }
 
@@ -920,7 +994,15 @@
 
   function gval(k, d) { try { var v = GM_getValue(k, d); return v === undefined ? d : v; } catch (e) { return d; } }
 
-  function isEnabled() { return gval("lfa_enabled", true) !== false; }
+  var enabledCache = null;   // v1.0.6: 启用状态内存缓存，写入时失效（避免每链接/每轮扫描同步读 GM）
+  function isEnabled() {
+    if (enabledCache === null) enabledCache = gval("lfa_enabled", true) !== false;
+    return enabledCache;
+  }
+  function writeEnabled(v) {
+    enabledCache = !!v;
+    try { GM_setValue("lfa_enabled", enabledCache); } catch (e) { }
+  }
 
   function getBlacklist() { var b = gval("lfa_blacklist", []); return Array.isArray(b) ? b : []; }
   function isBlacklisted(host) { return getBlacklist().indexOf(host) !== -1; }
@@ -945,7 +1027,7 @@
       for (var i = 0; i < arr.length; i++) {
         var a = arr[i];
         if (!a.parentNode) continue;
-        var txt = document.createTextNode(a.getAttribute("data-raw") || a.textContent);
+        var txt = lfaTextNode(a.getAttribute("data-raw") || a.textContent);
         a.parentNode.replaceChild(txt, a);
       }
     } finally {
@@ -962,7 +1044,7 @@
         var a = arr[i];
         if (a.getAttribute("data-rule") !== ruleId) continue;
         if (!a.parentNode) continue;
-        var txt = document.createTextNode(a.getAttribute("data-raw") || a.textContent);
+        var txt = lfaTextNode(a.getAttribute("data-raw") || a.textContent);
         a.parentNode.replaceChild(txt, a);
       }
     } finally {
@@ -1332,7 +1414,7 @@
         if (data.opts.hasOwnProperty(k)) setOpt(k, data.opts[k]);
       }
     }
-    if (typeof data.enabled === "boolean") GM_setValue("lfa_enabled", data.enabled);
+    if (typeof data.enabled === "boolean") writeEnabled(data.enabled);
     saveRules();
     refreshMenu();
     reapply();
@@ -1603,7 +1685,7 @@
     h.textContent = title;
     var ver = document.createElement("span");
     ver.className = "lfa-head-ver";
-    ver.textContent = "v1.0.5";
+    ver.textContent = "v1.0.6";
     var closeBtn = document.createElement("span");
     closeBtn.className = "lfa-close";
     closeBtn.textContent = "✕";
@@ -1622,12 +1704,16 @@
     wrap.appendChild(body);
     (document.body || document.documentElement).appendChild(wrap);
 
+    function onKey(e) {
+      if (e.key === "Escape") { e.preventDefault(); close(); }
+    }
+    var dragMove = null, dragUp = null;
     function close() {
       wrap.remove();
       document.removeEventListener("keydown", onKey, true);
-    }
-    function onKey(e) {
-      if (e.key === "Escape") { e.preventDefault(); close(); }
+      // v1.0.6: 面板关闭时移除全局拖拽监听（此前每次打开面板都会遗留两个全局监听）
+      if (dragMove) document.removeEventListener("mousemove", dragMove);
+      if (dragUp) document.removeEventListener("mouseup", dragUp);
     }
     closeBtn.addEventListener("click", close);
     document.addEventListener("keydown", onKey, true);
@@ -1641,13 +1727,15 @@
         sx = e.clientX; sy = e.clientY; bx = r.left; by = r.top;
         e.preventDefault();
       });
-      document.addEventListener("mousemove", function (e) {
+      dragMove = function (e) {
         if (!dragging) return;
         wrap.style.left = (bx + e.clientX - sx) + "px";
         wrap.style.top = (by + e.clientY - sy) + "px";
         wrap.style.transform = "none";
-      });
-      document.addEventListener("mouseup", function () { dragging = false; });
+      };
+      dragUp = function () { dragging = false; };
+      document.addEventListener("mousemove", dragMove);
+      document.addEventListener("mouseup", dragUp);
     }
     return { wrap: wrap, body: body, close: close };
   }
@@ -2030,7 +2118,7 @@
       isEnabled() ? "✅ 总开关：已启用（点击关闭）" : "⛔ 总开关：已停用（点击开启）",
       function () {
         var next = !isEnabled();
-        GM_setValue("lfa_enabled", next);
+        writeEnabled(next);
         refreshMenu();
         if (next) { activate(); toast("Linkify 已启用，本页即刻生效"); }
         else { deactivate(); unwrapAll(); toast("Linkify 已停用，本页已还原"); }
@@ -2213,7 +2301,8 @@
   function activate() {
     injectStyle();
     bindEvents();
-    if (document.body) processRootDeep(document.body);
+    // v1.0.6: 初始全页扫描带预算，剩余节点入队分批转换——巨型页面首扫也不占长任务
+    if (document.body) processRootDeep(document.body, 0, SCAN_BUDGET_INIT);
     startObserve();
     startSweep();
     startChecker();
