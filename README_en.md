@@ -1,6 +1,6 @@
 # Linkify All
 
-[简体中文](README.md) | [繁體中文](README.zh-TW.md) | English
+[简体中文](README.md) | [繁體中文](README_zh-TW.md) | English
 
 Turns plain-text URLs on any web page into clickable links automatically. A zero-dependency, fully local, instantly effective Tampermonkey userscript.
 
