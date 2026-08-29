@@ -1,6 +1,6 @@
 # Linkify All
 
-[简体中文](../README.md) | 繁體中文 | [English](README_en.md)
+ [简体中文](../README.md) | 繁體中文 | [English](linkify-all.en.md)
 
 把任意網頁中的明文網址自動變成可點擊的連結。零依賴、純本機、即時生效的油猴（Tampermonkey）使用者腳本。
 

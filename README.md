@@ -1,6 +1,6 @@
 # Linkify All
 
-简体中文 | [繁體中文](docs/README_zh-TW.md) | [English](docs/README_en.md)
+简体中文 | [繁體中文](docs/linkify-all.zh-TW.md) | [English](docs/linkify-all.en.md)
 
 把任意网页中的明文网址自动变成可点击的链接。零依赖、纯本地、即时生效的油猴（Tampermonkey）用户脚本。
 
