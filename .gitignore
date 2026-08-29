@@ -1,2 +1,15 @@
 # 回归测试文件仅本地维护，不随仓库发布
 tests/
+docs/
+FIXES-*.md
+
+# 本地开发/CI 文件（依赖本地 tests/，不入库）
+package.json
+.eslintrc.json
+.cnb.yml
+.github/
+
+# 本地开发依赖与杂项
+node_modules/
+npm-debug.log*
+.DS_Store

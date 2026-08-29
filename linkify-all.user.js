@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Linkify All - 明文链接自动转换
 // @namespace    local.linkify.all
-// @version      1.0.7
+// @version      1.0.8
 // @description  把任意网页中的明文网址自动变成可点击链接：全站生效、子域名识别、场景开关、学习规则、网盘提取码自动填入、失效链接检测、WebDAV 版本化云备份。零依赖纯本地。
 // @author       polan-prologue
 // @match        *://*/*
@@ -13,6 +13,7 @@
 // @grant        GM_registerMenuCommand
 // @grant        GM_unregisterMenuCommand
 // @grant        GM_xmlhttpRequest
+// @grant        GM_addValueChangeListener
 // @connect      *
 // @homepageURL  https://github.com/polan-prologue/linkify-all
 // @supportURL   https://github.com/polan-prologue/linkify-all/issues
@@ -47,6 +48,8 @@
 
   /* ══════════════════ 可调配置 ══════════════════ */
 
+  var VERSION = "1.0.8";   // 单一版本源：面板角标、导出元数据统一引用，避免漏改
+
   var MAX_TEXT_LENGTH = 50000;
   var BATCH_DELAY = 150;
   var SWEEP_INTERVAL = 2500;
@@ -79,14 +82,55 @@
 
   /* ══════════════════ 识别正则 ══════════════════ */
 
+  /* v1.0.8: 公共后缀（TLD）白名单。
+   * 此前 TLD 判定写作 [a-zA-Z]{2,24}，语义等于「任意字母串」——
+   * Chrome.120.Release、app.v2.example 这类三段非域名文本会被误转成链接。
+   * 现在无 www、无协议、无路径的三段主机必须命中白名单才转换；
+   * 带协议头或 www 前缀属强信号，不受白名单限制（见 SCHEME_SRC / HOST_WWW）。
+   * 表内 ccTLD 取 ISO 3166-1，gTLD 取主流高频项，另含 RFC 2606 保留域
+   * （example/test/invalid/localhost/local）——保留域被大量用作占位与内网主机名，
+   * 本项目回归测试亦全部基于 example.* 系列。 */
+  var TLD_LIST = (
+    "ac|ad|ae|aero|af|ag|ai|al|am|ao|app|aq|ar|arpa|as|asia|at|au|aw|ax|az|" +
+    "ba|bar|bb|bd|be|bf|bg|bh|bi|biz|bj|blog|bm|bn|bo|br|bs|bt|bw|by|bz|" +
+    "ca|cat|cc|cd|cf|cg|ch|ci|cl|click|cloud|club|cm|cn|co|com|coop|cr|cu|cv|cw|cx|cy|cz|" +
+    "de|design|dev|digital|dj|dk|dm|do|dz|" +
+    "ec|edu|ee|eg|email|er|es|et|eu|example|" +
+    "fi|fm|fo|fr|fun|" +
+    "ga|gb|gd|ge|gf|gg|gh|gi|gl|gm|gn|gov|gp|gq|gr|gs|gt|gu|gw|gy|" +
+    "hk|hm|hn|host|hr|ht|hu|" +
+    "id|ie|il|im|in|info|int|invalid|io|iq|ir|is|it|" +
+    "je|jm|jo|jobs|jp|" +
+    "ke|kg|kh|ki|km|kn|kp|kr|kw|ky|kz|" +
+    "la|lb|lc|life|li|link|live|lk|local|localhost|lr|ls|lt|lu|lv|ly|" +
+    "ma|mc|md|me|media|mg|mh|mil|mk|ml|mm|mn|mo|mobi|mp|mq|mr|ms|mt|mu|museum|mv|mw|mx|my|mz|" +
+    "na|name|nc|ne|net|nf|ng|ni|nl|no|np|nr|nu|nz|" +
+    "om|online|org|" +
+    "pa|pe|pf|pg|ph|pk|pl|pm|pn|post|press|pro|ps|pt|pw|py|" +
+    "qa|" +
+    "re|ro|rs|ru|rw|" +
+    "sa|sb|sc|sd|se|sg|sh|shop|si|sj|sk|site|sl|sm|sn|so|space|sr|ss|st|store|su|sv|sx|sy|sz|" +
+    "tc|td|tech|tel|tf|tg|th|tj|tk|tl|tm|tn|to|top|today|tr|travel|tt|tv|tw|tz|" +
+    "ua|ug|uk|us|uy|uz|" +
+    "va|vc|ve|vg|vi|vip|vn|vu|" +
+    "wf|wiki|work|world|ws|" +
+    "xyz|" +
+    "ye|yt|" +
+    "za|zm|zw"
+  ).split("|");
+  // 尾接负向断言：防止 alternation 里的短项抢跑（co 吃掉 com 的 m）
+  var TLD = "(?:" + TLD_LIST.join("|") + ")(?![a-zA-Z0-9-])";
+  var TLD_LOOSE = "[a-zA-Z]{2,24}(?![a-zA-Z0-9-])";   // 强信号分支（www / 带路径）用，宽松
+
   var P = "[^\\s<>\"'{}|\\^\\[\\]`\\x7f-\\uffff]";
-  var SCHEME_SRC = "\\bhttps?:\\/\\/" + P + "+";
+  var SCHEME_SRC = "\\bhttps?:\\/\\/" + P + "+";       // 带协议头：最强信号，不做 TLD 校验
   var LABEL = "[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?";
-  var DOMAIN = "(?:" + LABEL + "\\.)+[a-zA-Z]{2,24}";
-  var HOST_WWW = "www\\.(?:" + LABEL + "\\.)*[a-zA-Z]{2,24}";
+  var DOMAIN = "(?:" + LABEL + "\\.)+" + TLD_LOOSE;    // 二段裸域：仅在 HOST_PATH（带路径）分支使用
+  var HOST_WWW = "www\\.(?:" + LABEL + "\\.)*" + TLD_LOOSE;
   // 子域名主机（≥3 段，如 news.example.com）：无 www 无路径也值得转换，
-  // 与易误判的二段裸域名（example.com，仍不转）区分
-  var HOST_SUB = "(?:" + LABEL + "\\.){2,}[a-zA-Z]{2,24}";
+  // 与易误判的二段裸域名（example.com，仍不转）区分。
+  // v1.0.8：此分支无协议无 www 无路径，信号最弱 → 强制 TLD 白名单
+  var HOST_SUB = "(?:" + LABEL + "\\.){2,}" + TLD;
   var HOST_PATH = DOMAIN + "(?:\\/" + P + "*)";
   var HOST_WWW_P = HOST_WWW + "(?:\\/" + P + "*)?";
   var HOST_SUB_P = HOST_SUB + "(?:\\/" + P + "*)?";
@@ -121,10 +165,26 @@
   var skipCache = new WeakMap();   // v1.0.3: 父元素 → 祖先链 skippable 判定缓存
   var ownNodes = new WeakSet();    // v1.0.6: 本脚本创建的节点，MutationObserver 不再回处理
   var optCache = null;             // v1.0.6: 场景开关内存快照，setOpt 时失效重建
-  function setOpt(k, on) {
-    try { GM_setValue("lfa_opt_" + k, !!on); } catch (e) { }
+
+  /* v1.0.8: 统一失效入口。
+   * 此前 enabledCache / optCache / skipCache 三套缓存分散在 writeEnabled、setOpt、
+   * reapply 三处各自失效，新增状态时极易漏掉一处造成「改了设置但页面不生效」。
+   * 现在所有失效（含跨标签同步回调）都走这一个函数。 */
+  function invalidateState() {
+    enabledCache = null;
     optCache = null;
-    skipCache = new WeakMap();     // 场景开关变化后判定失效，整表重建
+    blacklistCache = null;
+    skipCache = new WeakMap();
+  }
+
+  // v1.0.8: 本页写入后的静默窗口（ms）——跨标签监听器据此忽略本页自己引发的变更
+  var selfWriteUntil = 0;
+  function markSelfWrite() { selfWriteUntil = Date.now() + 400; }
+
+  function setOpt(k, on) {
+    markSelfWrite();
+    try { GM_setValue("lfa_opt_" + k, !!on); } catch (e) { }
+    invalidateState();
   }
 
   function allOpts() {
@@ -144,9 +204,20 @@
     var o = optSnapshot();
     var precode = o.precode, editable = o.editable, control = o.control, linkinside = o.linkinside;
     for (var n = node; n; n = n.parentNode) {
-      if (n === document.body || n.nodeType === 11) break;
+      if (n === document.body) break;
+      /* v1.0.8: ShadowRoot（nodeType 11）——此前遇到即 break，Shadow 内部文本的
+       * 祖先链到 shadow root 就断了，永远拿不到宿主：宿主若是按钮 / contentEditable
+       * 编辑器，其内部文本就会被误转换（富文本编辑器开关在 Web Component 内失效）。
+       * 现在跳到宿主继续向上判定，宿主自身的标签与 contentEditable 状态同样参与检查。 */
+      if (n.nodeType === 11) {
+        if (!n.host) break;
+        n = n.host;
+        if (n === document.body || n === document.documentElement) break;
+      }
       if (n.nodeType !== 1) continue;
       var tag = n.tagName;
+      // v1.0.8: 本脚本自己的设置面板 / 学习弹窗一律跳过（此前面板文本会被自己转换）
+      if (n.getAttribute && n.getAttribute("data-lfa-ui") === "1") return true;
       if (tag === "A") {
         // v1.0.6: 自身产出的链接恒定跳过——即使「已有链接内部」开启，也不对自己重复转换嵌套
         if (n.getAttribute && n.getAttribute("data-lfa") === "1") return true;
@@ -177,8 +248,8 @@
 
   // 场景开关变化后的整页重处理（先还原再转换，保证前后一致）
   function reapply() {
+    invalidateState();
     if (!isEnabled() || isBlacklisted(location.hostname)) return;
-    skipCache = new WeakMap();
     deactivate();
     unwrapAll();
     activate();
@@ -269,6 +340,14 @@
   var rules = [];
   var rulesDirty = false;
 
+  /* v1.0.8: 规则目标地址必须是 http(s) —— 统一校验入口。
+   * UI 教学路径（inferRule）原本就有校验，但「导入备份」与「从存储加载」两条
+   * 路径此前完全绕过校验：被污染的备份文件可以让脚本在页面上生成 javascript:
+   * 伪协议锚点，点击即在当前站点上下文执行。此处堵住该注入面。 */
+  function safeRuleUrl(u) {
+    return typeof u === "string" && /^https?:\/\//i.test(u);
+  }
+
   function escapeRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
 
   function longestCommonSubstr(a, b) {
@@ -346,7 +425,7 @@
     if (!Array.isArray(raw)) return;
     for (var i = 0; i < raw.length; i++) {
       var r = raw[i];
-      if (!r || !r.pat || !r.urlPre) continue;
+      if (!r || !r.pat || !safeRuleUrl(r.urlPre)) continue;   // v1.0.8: 拒绝非 http(s) 规则
       var c = {
         id: r.id, pat: r.pat, urlPre: r.urlPre, urlSuf: r.urlSuf || "",
         probe: r.probe || "", sampleRaw: r.sampleRaw || "", sampleUrl: r.sampleUrl || "",
@@ -451,6 +530,11 @@
 
   function looksLikeFileName(raw) {
     if (/^https?:\/\//i.test(raw)) return false; // 带协议头的完整 URL 不否决（.zip 直链是真链接）
+    // v1.0.8: 含路径分隔符 → 这是 URL 路径形态（下载直链 / 镜像地址），不做文件名否决。
+    // 此前对整串取末段扩展名，导致 github.com/.../app.apk、dl.example.com/setup.exe
+    // 这类真实下载直链被整条否决。文件名否决本只为拦截「无路径的裸附件名」
+    // （example-app-1.0.17-win64.zip），那些样本都不含 "/"，故此改动无回归风险。
+    if (raw.indexOf("/") !== -1) return false;
     var segs = raw.split(".");
     if (segs.length < 2) return false;
     return FILE_EXT_BLACKLIST[segs[segs.length - 1].toLowerCase()] === 1;
@@ -521,6 +605,8 @@
   }
 
   function buildAnchor(hit) {
+    // v1.0.8: 出口兜底——任何来源的 href 只要不是 http(s) 就不生成锚点（返回 null）
+    if (!hit || !safeRuleUrl(hit.href)) return null;
     var a = document.createElement("a");
     var href = hit.href;
     if (hit.code && isPanUrl(href)) {
@@ -658,10 +744,10 @@
     var text = node.nodeValue;
     if (INVISIBLE_RE.test(text)) {
       text = text.replace(INVISIBLE_RE, "");   // v1.0.1: 剥离零宽字符后再匹配
-      // v1.0.4: 标记内部写入，避免 nodeValue 变更触发 MO 产生额外处理
-      internalWrite = true;
+      // v1.0.8: 移除 internalWrite 包裹。观察器只监听 childList，改写 nodeValue
+      // 本就不产生 mutation record；该标志是同步块置位/复位，而 MO 回调在微任务
+      // 触发，执行时标志早已复位——实际从未生效过，只留下误导。
       try { node.nodeValue = text; } catch (e) { }
-      internalWrite = false;
     }
     if (!text || text.length < 6 || text.length > MAX_TEXT_LENGTH) return false;
     if (!node.parentNode) return false;
@@ -724,13 +810,15 @@
     for (var i = 0; i < merged.length; i++) {
       var h = merged[i];
       if (h.start > pos) frag.appendChild(lfaTextNode(text.slice(pos, h.start)));
-      frag.appendChild(buildAnchor(h));
+      var anc = buildAnchor(h);
+      // v1.0.8: 锚点被安全闸门拒绝时把原文原样放回，绝不吞掉页面文本
+      if (anc) frag.appendChild(anc);
+      else frag.appendChild(lfaTextNode(text.slice(h.start, h.end)));
       pos = h.end;
     }
     if (pos < text.length) frag.appendChild(lfaTextNode(text.slice(pos)));
 
-    // v1.0.6: 转换写入自身 DOM 时挂 internalWrite，本脚本产物不再回流观察器队列
-    internalWrite = true;
+    // v1.0.8: 自身产物抑制改由 ownNodes（WeakSet）在观察器入口统一拦截
     try {
       node.parentNode.replaceChild(frag, node);
       if (removeParts) {
@@ -751,9 +839,7 @@
           }
         }
       }
-    } finally {
-      internalWrite = false;
-    }
+    } catch (e) { }
     sweepConverted++;
     return true;
   }
@@ -830,7 +916,11 @@
     var bailed = deadline !== 0 && i < textNodes.length;
     if (bailed) {
       // v1.0.6: 剩余节点入队分批处理（每批 8 个 + 宏任务让出），不阻塞渲染也不丢节点
+      // v1.0.8: Shadow 宿主也必须入队——此前超预算时 hosts 被直接丢弃，
+      // 大页面首扫被打断后 Shadow 内的链接只能等兜底扫描（而兜底同样会 bailed 并
+      // 同样丢 hosts），导致 Web Component 里的链接长时间不被转换
       for (var r = i; r < textNodes.length; r++) schedule(textNodes[r]);
+      for (var h = 0; h < hosts.length; h++) schedule(hosts[h]);
     } else {
       // 预算沿宿主递归传递：Shadow 子树同样受限，扫不玩的剩余部分入队续扫
       for (var j = 0; j < hosts.length; j++) processRootDeep(hosts[j], depth + 1, budgetMs);
@@ -845,7 +935,7 @@
   var queue = new Set();
   var pending = new Set();   // v1.0.6: 队列+余量的全部待处理节点，供观察器批内祖先去重
   var timer = 0;
-  var internalWrite = false;
+  // v1.0.8: 移除 internalWrite —— 自身产物抑制统一走 ownNodes 判定的 schedule/观察器入口
 
   function observeRoot(root) {
     if (!mo || !root) return;
@@ -856,9 +946,25 @@
     } catch (e) { }
   }
 
+  /* v1.0.8: 节点是否位于本脚本自己的 UI（设置面板 / 学习弹窗 / 恢复面板）内。
+   * 此前面板 DOM 无任何标记，观察器把面板插入当成页面变更处理，导致设置面板
+   * 规则列表里显示的 sampleUrl 文本被脚本自己转成链接。
+   * 深度上限 10：面板层级最深处约 6 层，够用且不会让普通页面节点爬满整条祖先链。 */
+  function inLfaUI(node) {
+    var n = node, guard = 0;
+    while (n && guard++ < 10) {
+      if (n === document.body || n === document.documentElement) return false;
+      if (n.nodeType === 11) { n = n.host; continue; }
+      if (n.nodeType === 1 && n.getAttribute && n.getAttribute("data-lfa-ui") === "1") return true;
+      n = n.parentNode;
+    }
+    return false;
+  }
+
   function schedule(node) {
-    if (internalWrite) return;
+    if (!node) return;
     if (ownNodes.has(node)) return;   // v1.0.6: 自身产物不入队
+    if (inLfaUI(node)) return;        // v1.0.8: 本脚本自己的面板不参与转换
     mutCount++;   // v1.0.3: 变更计数供兜底扫描门控使用
     queue.add(node);
     pending.add(node);
@@ -894,7 +1000,6 @@
   function startObserve() {
     if (mo) { observeRoot(document.body); return; }
     mo = new MutationObserver(function (muts) {
-      if (internalWrite) return;   // v1.0.6: 自身写入窗口内的回调整批跳过
       // v1.0.6: 先整批收集再统一去重：同批同时新增「父容器+子节点」时只处理父容器，
       // 且已待处理的祖先覆盖其子孙节点——框架/页面批量插大树不再对重叠子树重复爬取
       var into = [];
@@ -1027,18 +1132,67 @@
 
   function gval(k, d) { try { var v = GM_getValue(k, d); return v === undefined ? d : v; } catch (e) { return d; } }
 
-  var enabledCache = null;   // v1.0.6: 启用状态内存缓存，写入时失效（避免每链接/每轮扫描同步读 GM）
+  var enabledCache = null;     // v1.0.6: 启用状态内存缓存，写入时失效（避免每链接/每轮扫描同步读 GM）
+  var blacklistCache = null;   // v1.0.8: 黑名单内存缓存，与上面同走 invalidateState
   function isEnabled() {
     if (enabledCache === null) enabledCache = gval("lfa_enabled", true) !== false;
     return enabledCache;
   }
   function writeEnabled(v) {
     enabledCache = !!v;
+    markSelfWrite();
     try { GM_setValue("lfa_enabled", enabledCache); } catch (e) { }
   }
 
-  function getBlacklist() { var b = gval("lfa_blacklist", []); return Array.isArray(b) ? b : []; }
-  function isBlacklisted(host) { return getBlacklist().indexOf(host) !== -1; }
+  function getBlacklist() {
+    if (blacklistCache === null) {
+      var b = gval("lfa_blacklist", []);
+      blacklistCache = Array.isArray(b) ? b : [];
+    }
+    return blacklistCache;
+  }
+  // v1.0.8: 子域继承——加入 example.com 即同时覆盖 www.example.com / a.b.example.com。
+  // 此前是 hostname 精确相等比较，主域名与 www 得加两次，用户很容易以为没生效。
+  function isBlacklisted(host) {
+    var bl = getBlacklist(), i, e;
+    for (i = 0; i < bl.length; i++) {
+      e = bl[i];
+      if (typeof e !== "string" || !e) continue;
+      if (host === e) return true;
+      if (host.length > e.length + 1 && host.slice(-(e.length + 1)) === "." + e) return true;
+    }
+    return false;
+  }
+  function writeBlacklist(b) {
+    blacklistCache = b;
+    markSelfWrite();
+    try { GM_setValue("lfa_blacklist", b); } catch (e) { }
+  }
+
+  /* v1.0.8: 跨标签页状态同步。
+   * 此前每个标签页各自持有启用状态 / 场景开关 / 黑名单的内存快照，A 页关掉总开关
+   * 或拉黑站点后，B 页仍在继续转换，用户会以为「设置没生效」。
+   * 这里监听 Tampermonkey 存储变更，仅响应来自其它标签页（remote）的写入。 */
+  function watchStorage() {
+    if (typeof GM_addValueChangeListener !== "function") return;
+    var keys = ["lfa_enabled", "lfa_blacklist", RULES_KEY], k;
+    for (k in OPT_DEFAULTS) if (OPT_DEFAULTS.hasOwnProperty(k)) keys.push("lfa_opt_" + k);
+    for (var i = 0; i < keys.length; i++) {
+      (function (key) {
+        try {
+          GM_addValueChangeListener(key, function (name, oldV, newV, remote) {
+            if (!remote && Date.now() < selfWriteUntil) return;   // 本页自己引发的变更，跳过
+            invalidateState();
+            if (name === RULES_KEY) loadRules();
+            try { refreshMenu(); } catch (e) { }
+            deactivate();
+            unwrapAll();
+            if (isEnabled() && !isBlacklisted(location.hostname)) activate();
+          });
+        } catch (e) { }
+      })(keys[i]);
+    }
+  }
 
   /* ══════════════════ 还原 ══════════════════ */
 
@@ -1053,35 +1207,13 @@
   }
 
   function unwrapAll() {
-    internalWrite = true;
-    try {
-      var arr = [];
-      collectAnchors(document.body, arr);
-      for (var i = 0; i < arr.length; i++) {
-        var a = arr[i];
-        if (!a.parentNode) continue;
-        var txt = lfaTextNode(a.getAttribute("data-raw") || a.textContent);
-        a.parentNode.replaceChild(txt, a);
-      }
-    } finally {
-      internalWrite = false;
-    }
-  }
-
-  function unwrapRuleAnchors(ruleId) {
-    internalWrite = true;
-    try {
-      var arr = [];
-      collectAnchors(document.body, arr);
-      for (var i = 0; i < arr.length; i++) {
-        var a = arr[i];
-        if (a.getAttribute("data-rule") !== ruleId) continue;
-        if (!a.parentNode) continue;
-        var txt = lfaTextNode(a.getAttribute("data-raw") || a.textContent);
-        a.parentNode.replaceChild(txt, a);
-      }
-    } finally {
-      internalWrite = false;
+    var arr = [];
+    collectAnchors(document.body, arr);
+    for (var i = 0; i < arr.length; i++) {
+      var a = arr[i];
+      if (!a.parentNode) continue;
+      var txt = lfaTextNode(a.getAttribute("data-raw") || a.textContent);
+      try { a.parentNode.replaceChild(txt, a); } catch (e) { }
     }
   }
 
@@ -1122,9 +1254,16 @@
     return e.dead ? true : false;
   }
 
+  // v1.0.8: 补上保留域与 IPv6 环回 / 唯一本地地址。失效检测会对外发匿名请求，
+  // 探测内网地址既无意义（必然判为失效）又属于无谓外发，一律跳过
   function isLocalUrl(u) {
     var h = hostOf(u);
-    return /^(localhost|127\.|192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)/i.test(h);
+    if (!h) return true;
+    if (/^(localhost|127\.|192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)/i.test(h)) return true;
+    if (/(^|\.)(local|internal|intranet|lan|home|corp|private|test|invalid)$/i.test(h)) return true;
+    var bare = h.replace(/^\[|\]$/g, "");   // IPv6 的 hostname 带方括号
+    if (bare === "::1" || /^f[cd][0-9a-f]{2}:/i.test(bare)) return true;
+    return false;
   }
 
   function applyDead(anchor) {
@@ -1420,7 +1559,8 @@
     var added = 0, skipped = 0, i, j;
     for (i = 0; i < data.rules.length; i++) {
       var r = data.rules[i];
-      if (!r || !r.pat || !r.urlPre) { skipped++; continue; }
+      // v1.0.8: 除结构校验外，目标地址必须是 http(s)，拒绝 javascript: 等伪协议规则
+      if (!r || !r.pat || !safeRuleUrl(r.urlPre)) { skipped++; continue; }
       var dup = false;
       for (j = 0; j < rules.length; j++) { if (rules[j].pat === r.pat) { dup = true; break; } }
       if (dup) { skipped++; continue; }
@@ -1440,7 +1580,7 @@
         var h = data.blacklist[i];
         if (typeof h === "string" && bl.indexOf(h) === -1) bl.push(h);
       }
-      GM_setValue("lfa_blacklist", bl);
+      writeBlacklist(bl);
     }
     if (data.opts && typeof data.opts === "object") {
       for (var k in OPT_DEFAULTS) {
@@ -1697,6 +1837,9 @@
     (document.head || document.documentElement).appendChild(st);
   }
 
+  // v1.0.8: 面板栈——Esc 只关闭栈顶面板
+  var panelStack = [];
+
   // 返回 { wrap, body, close }；Esc 关闭；标题栏可拖动
   // fixed=true 时面板高度恒定（不随内容增长），body 内部滚动 —— 结构性保证
   // 「累加规则最外围窗体不被挤占」
@@ -1704,6 +1847,9 @@
     injectPanelStyle();
     var wrap = document.createElement("div");
     wrap.className = "lfa-panel";
+    // v1.0.8: 标记自身 UI —— 扫描（isSkippable）与观察器（schedule/inLfaUI）均跳过，
+    // 避免脚本把面板里显示的规则样例 URL 转成链接
+    wrap.setAttribute("data-lfa-ui", "1");
     if (fixed) {
       wrap.style.height = "min(600px, 88vh)";
       wrap.style.display = "flex";
@@ -1718,7 +1864,7 @@
     h.textContent = title;
     var ver = document.createElement("span");
     ver.className = "lfa-head-ver";
-    ver.textContent = "v1.0.7";
+    ver.textContent = "v" + VERSION;
     var closeBtn = document.createElement("span");
     closeBtn.className = "lfa-close";
     closeBtn.textContent = "✕";
@@ -1738,10 +1884,17 @@
     (document.body || document.documentElement).appendChild(wrap);
 
     function onKey(e) {
-      if (e.key === "Escape") { e.preventDefault(); close(); }
+      // v1.0.8: 只有栈顶面板响应 Esc。此前每个面板都在 document 上注册了 capture
+      // keydown，叠加打开（设置面板 + 学习弹窗）时按一次 Esc 会把它们全部关掉
+      if (e.key === "Escape" && panelStack[panelStack.length - 1] === wrap) {
+        e.preventDefault();
+        close();
+      }
     }
     var dragMove = null, dragUp = null;
     function close() {
+      var idx = panelStack.indexOf(wrap);
+      if (idx !== -1) panelStack.splice(idx, 1);
       wrap.remove();
       document.removeEventListener("keydown", onKey, true);
       // v1.0.6: 面板关闭时移除全局拖拽监听（此前每次打开面板都会遗留两个全局监听）
@@ -1750,6 +1903,7 @@
     }
     closeBtn.addEventListener("click", close);
     document.addEventListener("keydown", onKey, true);
+    panelStack.push(wrap);   // v1.0.8: 入栈，Esc 判定以栈顶为准
 
     if (drag !== false) {
       var dragging = false, sx = 0, sy = 0, bx = 0, by = 0;
@@ -1951,7 +2105,8 @@
           var bD = pv_btn(row, "删除", "danger", function () {
             for (var j = 0; j < rules.length; j++) { if (rules[j].id === r.id) { rules.splice(j, 1); break; } }
             saveRules();
-            unwrapRuleAnchors(r.id);
+            // v1.0.8: 去掉多余的 unwrapRuleAnchors(r.id) —— 紧随其后的 reapply()
+            // 会先 unwrapAll() 全页还原再重扫，单规则还原是被完全覆盖的重复工作
             reapply();
             toast("规则已删除");
           });
@@ -2166,14 +2321,14 @@
         var i = b.indexOf(host);
         if (i === -1) {
           b.push(host);
-          GM_setValue("lfa_blacklist", b);
+          writeBlacklist(b);
           refreshMenu();
           deactivate();
           unwrapAll();
-          toast("已加入黑名单并还原本页：" + host);
+          toast("已加入黑名单并还原本页：" + host + "（含子域名）");
         } else {
           b.splice(i, 1);
-          GM_setValue("lfa_blacklist", b);
+          writeBlacklist(b);
           refreshMenu();
           if (isEnabled()) activate();
           toast("已移出黑名单，本页即刻生效：" + host);
@@ -2182,48 +2337,6 @@
     );
     addMenu("🎓 学习新规则…", learnDialog);
     addMenu("⚙️ 设置…", settingsDialog);
-  }
-
-  /* ══════════════════ 手动兜底：强制转换选区 ══════════════════ */
-
-  function convertSelection() {
-    var sel = window.getSelection();
-    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) {
-      toast("请先用鼠标选中要转换的文本");
-      return;
-    }
-    var range = sel.getRangeAt(0);
-    var ca = range.commonAncestorContainer;
-    var hostEl = ca.nodeType === 1 ? ca : ca.parentNode;
-    for (var n = hostEl; n; n = n.parentNode) {
-      if (n === document.body || n.nodeType === 11) break;
-      if (n.nodeType !== 1) continue;
-      var tag = n.tagName;
-      if (tag === "A" || tag === "BUTTON") { toast("选中内容已在链接/按钮内，跳过"); return; }
-      if (n.isContentEditable) { toast("选中内容在编辑器内，跳过"); return; }
-      var ns = n.namespaceURI;
-      if (ns && ns !== HTML_NS) { toast("该区域不支持转换"); return; }
-    }
-    var raw = trimLoose(sel.toString());
-    if (!raw) { toast("选中的内容为空"); return; }
-    if (!/^https?:\/\//i.test(raw) && raw.indexOf(".") === -1) {
-      toast("选中的内容看起来不像网址");
-      return;
-    }
-    var href = toHref(raw);
-    if (!href) { toast("无法解析为有效网址"); return; }
-    var frag = range.extractContents();
-    var a = document.createElement("a");
-    var hit = { raw: raw, href: href, start: 0, end: 0 };
-    var ctxText = "";
-    try { ctxText = hostEl.textContent || ""; } catch (e) { }
-    var codeFound = null;
-    if (ctxText) codeFound = findCodeNear(ctxText, [{ start: 0, end: 0 }], 0);
-    if (codeFound && isPanUrl(href)) hit.code = codeFound;
-    var built = buildAnchor(hit);
-    built.appendChild(frag);
-    range.insertNode(built);
-    toast(codeFound ? "已转换为链接（含提取码：" + codeFound + "）" : "已转换为链接：" + built.href);
   }
 
   /* ══════════════════ Alt+点击 复制原文 / Ctrl+点击 直链跳转 ══════════════════ */
@@ -2322,8 +2435,9 @@
         toast(code ? "已复制原文及提取码：" + raw + "（" + code + "）" : "已复制原始文本：" + raw);
         return;
       }
-      // Ctrl+点击 直链跳转
-      if (e.ctrlKey && !e.metaKey) {
+      // v1.0.8: Ctrl / Cmd + 点击直链跳转。此前写死 e.ctrlKey && !e.metaKey，
+      // macOS 用户的自然手势是 Cmd+点击，等于这个功能在 Mac 上完全不可用
+      if (e.ctrlKey || e.metaKey) {
         directJump(e);
       }
     }, true);
@@ -2353,6 +2467,7 @@
     refreshMenu();
     if (isEnabled() && !isBlacklisted(location.hostname)) activate();
     autofillHook();
+    watchStorage();   // v1.0.8: 跨标签页状态同步（总开关 / 场景开关 / 黑名单 / 规则）
   }
 
   /* ══════════════════ 测试/调试钩子（默认关闭） ══════════════════
@@ -2361,7 +2476,13 @@
    */
   try {
     if (/[#&]lfa-dev\b/.test(location.hash || "")) {
+      // v1.0.8: 显式告警——该钩子拥有规则库写权限，仅供自动化回归测试使用。
+      // 注：addRule 走 inferRule（强制 http(s)）、applyImport 走 safeRuleUrl 校验后的
+      // applyImportData，伪协议规则已在两条路径上被拒（见 safeRuleUrl）
+      try { console.warn("[Linkify All] 测试钩子 __LFA__ 已注入（URL 含 #lfa-dev），仅供回归测试使用"); } catch (e) { }
       (typeof unsafeWindow !== "undefined" ? unsafeWindow : window).__LFA__ = {
+        version: VERSION,
+        isBlocked: isBlacklisted,   // v1.0.8: 供回归测试验证黑名单子域继承
         addRule: addRuleByPair,
         listRules: function () {
           return rules.map(function (r) {
