@@ -1,6 +1,6 @@
 # Linkify All
 
-[简体中文](README.md) | [繁體中文](README_zh-TW.md) | English
+[简体中文](../README.md) | [繁體中文](README_zh-TW.md) | English
 
 Turns plain-text URLs on any web page into clickable links automatically. A zero-dependency, fully local, instantly effective Tampermonkey userscript.
 
@@ -68,13 +68,13 @@ Tampermonkey pops up its install confirmation page — click "Install". Revisit 
 ### Option 2: Manual install
 
 1. Open the Tampermonkey dashboard → "Create a new script"
-2. Replace the editor template with the full contents of [`linkify-all.user.js`](./linkify-all.user.js)
+2. Replace the editor template with the full contents of [`linkify-all.user.js`](../linkify-all.user.js)
 3. Save with `Ctrl+S` — the script takes effect immediately
 
 ### Upgrading
 
 - Existing users: click the one-click install link again; Tampermonkey treats it as an update and keeps all your local data (rules / blacklist / settings)
-- v1.0.0 is the first public release (see [CHANGELOG.md](./CHANGELOG.md))
+- v1.0.0 is the first public release (see [CHANGELOG.md](../CHANGELOG.md))
 
 ---
 
@@ -223,6 +223,6 @@ A: Not yet (the script uses ES2020 features; Firefox would need separate adaptat
 
 ## License
 
-[MIT](./LICENSE)
+[MIT](../LICENSE)
 
-[Changelog → CHANGELOG.md](./CHANGELOG.md)
+[Changelog → CHANGELOG.md](../CHANGELOG.md)

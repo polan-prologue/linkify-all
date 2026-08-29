@@ -1,6 +1,6 @@
 # Linkify All
 
-[简体中文](README.md) | 繁體中文 | [English](README_en.md)
+[简体中文](../README.md) | 繁體中文 | [English](README_en.md)
 
 把任意網頁中的明文網址自動變成可點擊的連結。零依賴、純本機、即時生效的油猴（Tampermonkey）使用者腳本。
 
@@ -81,13 +81,13 @@
 ### 方式二：手動安裝
 
 1. 開啟 Tampermonkey 管理面板 → 「新增腳本」
-2. 刪除編輯器裡的範本內容，貼上 [`linkify-all.user.js`](./linkify-all.user.js) 全部程式碼
+2. 刪除編輯器裡的範本內容，貼上 [`linkify-all.user.js`](../linkify-all.user.js) 全部程式碼
 3. `Ctrl+S` 儲存，腳本即刻生效
 
 ### 升級方式
 
 - 已安裝使用者：重新點一次「一鍵安裝」連結，Tampermonkey 會識別為更新並保留你的全部本機資料（規則 / 黑名單 / 設定）
-- v1.0.0 起為首次公開版本，前身為內部迭代版本（見 [CHANGELOG.md](./CHANGELOG.md)）
+- v1.0.0 起為首次公開版本，前身為內部迭代版本（見 [CHANGELOG.md](../CHANGELOG.md)）
 
 ---
 
@@ -248,6 +248,6 @@ A：暫未適配（腳本使用 ES2020 特性，Firefox 需另行適配）。
 
 ## License
 
-[MIT](./LICENSE)
+[MIT](../LICENSE)
 
-[變更歷史 → CHANGELOG.md](./CHANGELOG.md)
+[變更歷史 → CHANGELOG.md](../CHANGELOG.md)
