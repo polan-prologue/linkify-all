@@ -6,6 +6,13 @@
 > 会被自动补全成可点击链接（新标签页打开）；而裸域名 `example.com`（二段、无 www、无路径）
 > 默认**不**转换——这是刻意的防误判设计，详见下文「转换规则速查」。
 
+## English
+
+**Linkify All** turns plain-text URLs into clickable links on any page — a zero-dependency, fully local Tampermonkey userscript. Highlights: site-wide auto-linkify (incl. Shadow DOM & SPA content); cross-node stitching of links fragmented by page platforms; learned wildcard rules; cloud-drive passcode autofill; dead-link marking; site blacklist with subdomain inheritance; cross-tab settings sync; versioned WebDAV backup. Zero telemetry — nothing ever leaves your browser.
+
+> 本文档以中文为主，本节为英文摘要；完整说明请阅读下方中文内容。
+> This document is primarily in Chinese; this section is an English summary. For full documentation, read the Chinese sections below.
+
 ---
 
 ## 功能特性
