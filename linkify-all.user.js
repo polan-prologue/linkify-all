@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Linkify All - 明文链接自动转换
 // @namespace    local.linkify.all
-// @version      1.0.8
+// @version      1.0.9
 // @description  把任意网页中的明文网址自动变成可点击链接：全站生效、子域名识别、场景开关、学习规则、网盘提取码自动填入、失效链接检测、WebDAV 版本化云备份。零依赖纯本地。
 // @author       polan-prologue
 // @match        *://*/*
@@ -48,7 +48,7 @@
 
   /* ══════════════════ 可调配置 ══════════════════ */
 
-  var VERSION = "1.0.8";   // 单一版本源：面板角标、导出元数据统一引用，避免漏改
+  var VERSION = "1.0.9";   // 单一版本源：面板角标、导出元数据统一引用，避免漏改
 
   var MAX_TEXT_LENGTH = 50000;
   var BATCH_DELAY = 150;
@@ -1843,10 +1843,25 @@
   // 返回 { wrap, body, close }；Esc 关闭；标题栏可拖动
   // fixed=true 时面板高度恒定（不随内容增长），body 内部滚动 —— 结构性保证
   // 「累加规则最外围窗体不被挤占」
-  function openPanel(title, drag, fixed) {
+  // key 传入时该面板为单例：同 key 面板仍开着就不新开第二个，只把已有的提到最前
+  // （返回 null），修复连点菜单叠出多个设置窗口
+  function openPanel(title, drag, fixed, key) {
     injectPanelStyle();
+    if (key) {
+      for (var pi = 0; pi < panelStack.length; pi++) {
+        if (panelStack[pi].__lfaKey === key) {
+          var exist = panelStack[pi];
+          // 面板若已被外部移出文档（如 SPA 整页重绘清空 body），按已关闭处理，
+          // 否则单例判定会永久命中一个看不见的面板，设置入口从此打不开
+          if (!exist.isConnected) { panelStack.splice(pi, 1); break; }
+          (document.body || document.documentElement).appendChild(exist);
+          return null;
+        }
+      }
+    }
     var wrap = document.createElement("div");
     wrap.className = "lfa-panel";
+    if (key) wrap.__lfaKey = key;
     // v1.0.8: 标记自身 UI —— 扫描（isSkippable）与观察器（schedule/inLfaUI）均跳过，
     // 避免脚本把面板里显示的规则样例 URL 转成链接
     wrap.setAttribute("data-lfa-ui", "1");
@@ -2015,7 +2030,9 @@
   // learnDialog 保存规则后回调它，让已打开的面板即时刷新规则列表
   var refreshSettingsRules = null;
 
-  function settingsDialog() {    var ui = openPanel("⚙️ Linkify All 设置", true, true);
+  function settingsDialog() {
+    var ui = openPanel("⚙️ Linkify All 设置", true, true, "settings");
+    if (!ui) { toast("设置面板已打开"); return null; }
 
     /* ── 场景开关 ── */
     pv_section(ui.body, "场景开关（对应区域是否转换链接）");
@@ -2074,7 +2091,7 @@
       if (!rules.length) {
         var em = document.createElement("div");
         em.className = "lfa-empty";
-        em.textContent = "还没有学习规则。点上方「＋ 学习新规则」输入一对示例即可教会它。";
+        em.textContent = "暂无规则，点上方「＋ 学习新规则」添加";
         frag.appendChild(em);
       } else {
       for (var i = 0; i < rules.length; i++) {
@@ -2205,7 +2222,8 @@
   /* ══════════════════ 学习新规则对话框（普通 DOM） ══════════════════ */
 
   function learnDialog() {
-    var ui = openPanel("🎓 学习新链接规则");
+    var ui = openPanel("🎓 学习新链接规则", true, false, "learn");
+    if (!ui) { toast("学习规则弹窗已打开"); return null; }
     pv_tip(ui.body, "窗口不挡页面：先选中页面文字再点「抓取选中文字」；原文本回车跳链接框，链接框回车提交；Esc 关闭。");
 
     var rawIn = pv_field(ui.body, "原文本（页面上的明文，如 app:abc-123）", "app:abc-123", "");
@@ -2278,6 +2296,7 @@
       if (e.key === "Enter") { e.preventDefault(); doSave(); }
     });
     rawIn.focus();
+    return ui;
   }
 
   /* ══════════════════ 菜单命令（精简为 4 项） ══════════════════ */
