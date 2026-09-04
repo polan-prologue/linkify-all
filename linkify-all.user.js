@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Linkify All - 明文链接自动转换
 // @namespace    local.linkify.all
-// @version      1.0.9
+// @version      1.1.0
 // @description  把任意网页中的明文网址自动变成可点击链接：全站生效、子域名识别、场景开关、学习规则、网盘提取码自动填入、失效链接检测、WebDAV 版本化云备份。零依赖纯本地。
 // @author       polan-prologue
 // @match        *://*/*
@@ -48,7 +48,7 @@
 
   /* ══════════════════ 可调配置 ══════════════════ */
 
-  var VERSION = "1.0.9";   // 单一版本源：面板角标、导出元数据统一引用，避免漏改
+  var VERSION = "1.1.0";   // 单一版本源：面板角标、导出元数据统一引用，避免漏改
 
   var MAX_TEXT_LENGTH = 50000;
   var BATCH_DELAY = 150;
@@ -641,8 +641,19 @@
    *    截断片段是「完整长相」（如 TLD 恰为 2 字符的 host + 路径起点），
    *    hostIncomplete 判不残缺 → 截断链直接漏网。新增触发器：原匹配以
    *    非字母数字（URL 结构符）收尾且紧邻内联元素包裹以 URL 字符开头时
-   *    同样进入续接管线。与 ①④ 合起来覆盖全部结构性切点：:// 、. 、/ ；
-   *    纯文本行文兄弟与字母数字收尾仍保守不吞（宁缺毋错）。 */
+   *    同样进入续接管线。
+   * v1.1.0 ⑥ **根本性原则——续接绝不回改已识别的主机**。前代触发器全部
+   *    假设「切点只落在 URL 结构分隔符上」，但平台分词对 URL 结构无感知，
+   *    词汇边界可落在路径/查询字符流的任意位置（实测案例：评论链接被拆成
+   *    "…/register?r" + 站内搜索锚"eferrer_code" + "=Wj1cwQfk"，切点
+   *    恰好落在字母数字中间，截断片段以字母数字收尾且主机完整 → 旧触发器
+   *    全部落空，「?r」半截链直接漏网成错误链接）。判定标准从「切点长得像
+   *    不像结构符」改为「续接会不会越界主机」：命中在主机之后已含路径/查询
+   *    分隔符（/ ? #）时，续接只能延伸路径/查询、绝不可能回改主机，因此
+   *    字母数字收尾也放行续接；命中止于主机末尾（无路径）时续接必然污染
+   *    主机（example.com|Uninstaller 型粘连），仍保守拒绝（P10/M6 负例）。
+   *    至此与 ①④⑤ 构成完整分类学：切点落主机内（残缺）、结构符上、
+   *    路径/查询字符流内 → 续接；唯一拒绝的是「续接会回改完整主机」。 */
 
   var CONT_URL_RE = /^[A-Za-z0-9._~:/?#@!$&'()*+,;=\-[\]%]+/;
   var INLINE_TAGS = { SPAN: 1, A: 1, B: 1, I: 1, EM: 1, STRONG: 1, U: 1, S: 1, CODE: 1, SMALL: 1, LABEL: 1, FONT: 1, WBR: 1, MARK: 1 };
@@ -680,6 +691,31 @@
   function splitAtInlineWrapper(hit, node, text) {
     var matched = text.slice(hit.start, hit.mend);
     if (!matched || /[A-Za-z0-9]$/.test(matched)) return false;
+    var sib = inlineEndNode(node).nextSibling, guard = 0;
+    while (sib && guard++ < 3) {
+      if (sib.nodeType === 1 && sib.getAttribute && sib.getAttribute("data-lfa")) return false;
+      var t = sib.nodeType === 3 ? (sib.nodeValue || "") : (sib.textContent || "");
+      if (!t) { sib = sib.nextSibling; continue; }
+      if (sib.nodeType !== 1) return false;
+      var tag = sib.tagName || "";
+      if (!INLINE_TAGS[tag] && tag.indexOf("-") === -1) return false;
+      return !!CONT_URL_RE.exec(t);
+    }
+    return false;
+  }
+
+  // v1.1.0：命中以字母数字收尾也可能是被切开的链接——平台分词不关心 URL
+  // 结构，词汇边界可落在路径/查询字符流内（实测：URL 中段被包成站内搜索锚）。
+  // 与 splitAtInlineWrapper 的区别只有一个判定维度：本触发器只放行「命中在
+  // 主机之后已含路径/查询分隔符（/ ? #）」的情形——此时续接只会延伸路径/
+  // 查询、绝不回改已识别的主机；命中止于主机末尾（无路径）时续接必然污染
+  // 主机（example.com|Uninstaller 型粘连），继续保守拒绝。兄弟探测与
+  // splitAtInlineWrapper 相同：穿透内联包裹后第一个带文本兄弟须为内联元素
+  // 或自定义元素且以 URL 字符开头；纯文本兄弟视为自然行文，不吞（宁缺毋错）。
+  function splitAtPathChar(hit, node, text) {
+    var matched = text.slice(hit.start, hit.mend);
+    if (!/[A-Za-z0-9]$/.test(matched)) return false;                    // 字母数字收尾才属本类
+    if (!/^https?:\/\/[^\/?#]+[\/?#]/i.test(matched)) return false;     // 主机后必须已有路径/查询
     var sib = inlineEndNode(node).nextSibling, guard = 0;
     while (sib && guard++ < 3) {
       if (sib.nodeType === 1 && sib.getAttribute && sib.getAttribute("data-lfa")) return false;
@@ -765,9 +801,13 @@
       var lastHit = urlHits[urlHits.length - 1];
       if (lastHit.mend >= text.length && !lastHit.suppressed) {
         // 触发器一（v1.0.2）：主机残缺——切点落在主机中段；
-        // 触发器二（v1.0.7）：主机完整但命中以 URL 结构符收尾且紧邻内联
-        // 元素续接——切点落在 "/" "." 等边界，截断片段是完整长相
-        if (hostIncomplete(lastHit.raw) || splitAtInlineWrapper(lastHit, node, text)) {
+        // 触发器二（v1.0.7）：切点落在 "/" "." 等结构分隔符上——截断片段
+        //   以非字母数字收尾、紧邻内联元素续接；
+        // 触发器三（v1.1.0）：切点落在路径/查询字符流内——平台分词把 URL
+        //   中段包成站内锚，命中以字母数字收尾但主机后已含 "/" "?" "#"，
+        //   续接只延伸路径、不回改主机
+        if (hostIncomplete(lastHit.raw) || splitAtInlineWrapper(lastHit, node, text) ||
+            splitAtPathChar(lastHit, node, text)) {
           removeParts = stitchFromHit(lastHit, node, text);
         }
       }
